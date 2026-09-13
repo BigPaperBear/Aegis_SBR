@@ -25,9 +25,11 @@ M.specTabs = {
 function M:BuildBody(ui, parent)
     local L = ui:NewLayout(parent)
     local function set(key) return function(v) if ui.buf then ui.buf[key] = v; ui:Refresh() end end end
+    L:MacroNote()
 
     L:Header("General")
     self.aoeRow = L:Row{ key = "aoeMode", label = "AoE rotation", onToggle = set("aoeMode") }
+    self.groundRow = L:Row{ key = "useGroundAoe", label = "Blizzard / Flamestrike at the mouse", onToggle = set("useGroundAoe") }
     self.useWandRow = L:Row{ key = "useWand", label = "Use wand", onToggle = set("useWand"),
         slider = { key = "wandHp", min = 0, max = 100, step = 5, suffix = "%", onChange = set("wandHp") } }
     self.wandManaRow = L:Row{ label = "Wand below mana",
@@ -88,7 +90,8 @@ function M:BuildBody(ui, parent)
     ui:Tip(self.prioClearBtn, "Clear", "Empties the list.")
 
     -- Tooltips carry the detail that used to be in the labels.
-    ui:Tip(self.aoeRow.cb, "AoE mode", "Frost Nova to freeze, Cone of Cold to snare, Icicles, then Arcane Explosion.", "Blizzard / Flamestrike are not auto-cast (they need a ground click). Also /sbr aoe.")
+    ui:Tip(self.aoeRow.cb, "AoE mode", "Frost Nova to freeze, Cone of Cold to snare, Icicles, then Arcane Explosion. Blizzard / Flamestrike only with the switch below.", "Also /sbr aoe, or per press with /sbr run aoe.")
+    ui:Tip(self.groundRow.cb, "Blizzard / Flamestrike at the mouse", "Lands under the mouse. Hold the mouse on the feet of the pack when pressing; with the mouse off any enemy the press skips it.")
     ui:Tip(self.useWandRow.cb, "Use wand", "On: finish low mobs and regen mana with the wand (the 'nuke then wand' rule). Off: never wand. With no wand equipped it just keeps casting.")
     ui:Tip(self.manaShieldRow.cb, "Mana Shield", "Optional. Keeps Mana Shield up (drains mana for damage), never stacked under Ice Barrier.")
     ui:Tip(self.frostNovaRow.cb, "Frost Nova", "Root the mob when it reaches melee so you can step back and wand - the leveling kite.")
@@ -111,6 +114,7 @@ end
 function M:RefreshBody(ui, buf)
     -- General
     ui:BindCheck(self.aoeRow, buf.aoeMode)
+    ui:BindCheck(self.groundRow, buf.useGroundAoe)
     ui:BindCheck(self.useWandRow, buf.useWand)
     if not self:HasWand() then
         self.useWandRow.label:SetText("Use wand (none)")

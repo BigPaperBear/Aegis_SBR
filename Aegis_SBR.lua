@@ -17,7 +17,7 @@
 -- ============================================================
 
 Aegis_SBR = {
-    ver = "1.2.27",
+    ver = "1.2.28",
     classes = {},     -- token -> module table
     active = nil,      -- the module for this character's class
     Loaded = false,
@@ -389,6 +389,95 @@ function Aegis_SBR:PickExtra(name)
     return true
 end
 
+-- Area spells that are aimed at the GROUND - Volley, Blizzard, Flamestrike,
+-- Rain of Fire, Hurricane. A plain CastSpellByName only opens the targeting
+-- reticle and waits for a click that a one-button rotation can never give,
+-- and nothing on this client can place the spell at the target's position:
+--
+--   * a unit as the second argument casts unit spells on that unit and leaves
+--     an area spell's reticle standing (read off a tester's log);
+--   * the old world click after opening the reticle (CameraOrSelectOrMoveStart/
+--     Stop) is blocked by Turtle's client as an action reserved for its UI;
+--   * SuperWoW 2.0's CastSpellByName(spell, "CLICK") casts at the mouse, but
+--     Nampower hooks the same function in the client and does not pass CLICK
+--     through - "Unknown unit name: CLICK" with both installed (SuperWoW
+--     issue 107), and Nampower is required here;
+--   * Nampower's SetMouseoverUnit("target") before the cast changes nothing:
+--     the spell still lands under the physical cursor.
+--
+-- What works is Nampower's own quickcast: the CVar NP_QuickcastTargetingSpells
+-- makes a terrain spell cast at once where the mouse points. It is a global
+-- setting the player may not want on for hand-cast spells, so it is raised
+-- for the one cast and put back. Nampower reads its CVars per cast - its own
+-- README toggles them around a single macro line the same way.
+--
+-- So the spell lands UNDER THE MOUSE, and the rotation only sends it while
+-- the mouse is over an attackable enemy - the one case in which the ground
+-- under the cursor is where the pack stands. Where the quickcast cannot place
+-- the spell (the mouse not on ground it can reach) the client is left in
+-- targeting mode, and a second cast of the same spell CANCELS that mode - which
+-- read back as "not targeting" and let the next press try again, a reticle
+-- flickering press after press. So the reticle is looked for before sending
+-- as well as after, a reticle left from the last press is put away, and the
+-- spell waits a few seconds. Without Nampower there is no placement at all:
+-- one line in chat, and ground spells stay manual until the next reload.
+--
+-- `send` is the module's own cast for the spell (its Queue, with whatever
+-- bookkeeping that carries); absent, a plain CastSpellByName goes out. State
+-- lives on `self`, so a module calling self:CastAtMouse keeps its own.
+local GROUND_RETRY = 8.0
+local NP_QUICKCAST = "NP_QuickcastTargetingSpells"
+
+function Aegis_SBR:CastAtMouse(name, reason, send)
+    if not name or not self:KnowsSpell(name) then return false end
+    if self.groundOff then return false end
+    if not self.groundHold then self.groundHold = {} end
+    local now = GetTime()
+    if (self.groundHold[name] or 0) > now then return false end
+    if Aegis_SBR.deciding then
+        local p = Aegis_SBR.decidePlan
+        p.spell = name; p.reason = reason or "under the mouse"
+        return true
+    end
+    if not self:CanAfford(name) then return false end
+    -- A reticle still standing from the last press: that placement failed.
+    if SpellIsTargeting and SpellIsTargeting() then
+        if SpellStopTargeting then SpellStopTargeting() end
+        self.groundHold[name] = now + GROUND_RETRY
+        if self:Tracing() then self:Trace(name .. ": reticle left from the last press - held " .. GROUND_RETRY .. "s") end
+        return false
+    end
+    if not (UnitExists("mouseover") and UnitCanAttack("player", "mouseover") and not UnitIsDead("mouseover")) then
+        if self:Tracing() then self:Trace(name .. ": mouse not on an enemy - skipped") end
+        return false
+    end
+    local quick = GetCVar and GetCVar(NP_QUICKCAST)
+    if quick == nil then
+        self.groundOff = true
+        self:Msg(name .. ": without Nampower it cannot be placed from the rotation - cast it by hand. Ground spells stay off until the next reload.", 1, 0.5, 0.3)
+        if self:Tracing() then self:Trace(name .. ": no quickcast on this client - ground spells off for the session") end
+        return false
+    end
+    if self:Tracing() then self:Trace(name .. ": quickcast under the mouse") end
+    if quick ~= "1" then SetCVar(NP_QUICKCAST, "1") end
+    local sent
+    if send then
+        sent = send()
+    else
+        self:NoteSpellCast(name)
+        CastSpellByName(name)
+        sent = true
+    end
+    if quick ~= "1" then SetCVar(NP_QUICKCAST, quick) end
+    if SpellIsTargeting and SpellIsTargeting() then
+        if SpellStopTargeting then SpellStopTargeting() end
+        self.groundHold[name] = now + GROUND_RETRY
+        if self:Tracing() then self:Trace(name .. ": nowhere to land under the mouse - held " .. GROUND_RETRY .. "s") end
+        return false
+    end
+    return sent and true or false
+end
+
 function Aegis_SBR:Later(fn)
     if Aegis_SBR.deciding then return end
     fn()
@@ -412,7 +501,8 @@ function Aegis_SBR:Preview()
     self:SnapshotTargetDebuffs()
     Aegis_SBR.decidePlan = { extras = {} }
     Aegis_SBR.deciding = true
-    local ok = pcall(function() mod:Rotate(cfg) end)
+    local eff = self:EffectiveConfig(cfg)
+    local ok = pcall(function() mod:Rotate(eff) end)
     Aegis_SBR.deciding = false
     local plan = Aegis_SBR.decidePlan
     Aegis_SBR.decidePlan = nil
@@ -1218,7 +1308,19 @@ end
 local moveFrame = CreateFrame("Frame")
 moveFrame:SetScript("OnUpdate", function() MoveSample() end)
 
+-- The player's switch. Account-wide, default on. Off, every consumer gets the
+-- same answer it gets when nothing can be measured - "standing still" - so
+-- channels, cast-time DoTs, Hammer of Wrath and the direct heals are simply
+-- attempted whenever the rotation reaches them, and the client decides.
+--
+-- For a player who would rather lose a cast to movement now and then than have
+-- the rotation hold anything back on its own reading of where they stand.
+function Aegis_SBR:MoveDetectEnabled()
+    return not (AegisDB and AegisDB.moveDetect == false)
+end
+
 function Aegis_SBR:Moving()
+    if not self:MoveDetectEnabled() then return false end
     if not UnitPosition then return false end
     -- Also sampled here, so the answer is still correct if the frame has not run
     -- yet - the very first press of a session, or a client that throttles
@@ -1254,6 +1356,7 @@ end
 -- Answers TRUE when movement cannot be measured at all (no SuperWoW), so this
 -- never becomes a gate that can never open.
 function Aegis_SBR:StillFor(seconds)
+    if not self:MoveDetectEnabled() then return true end
     if not UnitPosition then return true end
     if self:Moving() then return false end
     local s = self.moveSample
@@ -2097,6 +2200,16 @@ function Aegis_SBR:EnsureAutoAttack()
         -- anyone running SuperCleveRoidMacros, which drives the swing with
         -- /startattack so the button never needs slotting).
         --
+        -- With ClassicAPI the whole problem below disappears: StartAttack is a
+        -- start that never stops, so it can go out on every press and a swing
+        -- that dropped for any reason restarts on the next one - the same
+        -- guarantee the slotted path above gets from IsCurrentAction. Recorded
+        -- for the same reason as there.
+        if self:Capability("startattack") then
+            self:NoteSpellCast("Attack")
+            if self:StartMeleeAttack() then return end
+        end
+        --
         -- AttackTarget() is a TOGGLE on 1.12 - it STOPS the swing when one is
         -- already running, and there is no /startattack equivalent in the Lua
         -- API (that arrived in 2.0). With no slot there is also nothing to read
@@ -2718,7 +2831,51 @@ function Aegis_SBR:PerfStop()
     self.perfMax = nil
 end
 
-function Aegis_SBR:RunRotation()
+-- Is this press an AoE press?
+--
+-- Two ways to say so, and the macro wins: "/sbr run aoe" or "/sbr run single"
+-- decides for the press it is on, so a player can keep two spam macros and
+-- switch by pressing the other one. Without that, the profile's own AoE toggle
+-- applies, as it always has. The last macro answer is remembered briefly so the
+-- preview window follows the macro being pressed rather than the profile.
+local PRESS_MODE_HOLD = 2.0
+
+function Aegis_SBR:AoeMode(cfg)
+    local m = self.pressAoe
+    if m ~= nil and (GetTime() - (self.pressAoeAt or 0)) <= PRESS_MODE_HOLD then
+        return m
+    end
+    return (cfg and cfg.aoeMode) and true or false
+end
+
+-- The profile as this press sees it.
+--
+-- A profile may carry a second set of switches for AoE under cfg.aoe. On an
+-- AoE press, a key present there wins over the profile's own; a key absent
+-- there falls through, so a profile with no overrides at all behaves exactly as
+-- before. Done as a proxy rather than a merged copy so the rotation's reads
+-- cost nothing extra and its writes still land on the real profile.
+function Aegis_SBR:EffectiveConfig(cfg)
+    -- A module that keeps its own layers (the hunter: one per spec, each with
+    -- its own AoE set) applies them itself inside Rotate.
+    if self.active and self.active.ownsAoeLayer then return cfg end
+    if not cfg or type(cfg.aoe) ~= "table" or not self:AoeMode(cfg) then return cfg end
+    local over = cfg.aoe
+    return setmetatable({}, {
+        __index = function(_, k)
+            local v = over[k]
+            if v ~= nil then return v end
+            return cfg[k]
+        end,
+        __newindex = function(_, k, v) cfg[k] = v end,
+    })
+end
+
+function Aegis_SBR:RunRotation(mode)
+    -- "aoe" / "single" from the macro; nil leaves the profile's toggle in charge.
+    if mode == "aoe" then self.pressAoe = true; self.pressAoeAt = GetTime()
+    elseif mode == "single" then self.pressAoe = false; self.pressAoeAt = GetTime()
+    else self.pressAoe = nil end
     if not self.active then self:Throttle("no module for your class yet."); return end
     local cfg = self:GetActiveProfile()
     if not cfg then
@@ -2773,7 +2930,7 @@ function Aegis_SBR:RunRotation()
             self:SnapshotTargetDebuffs()
             self:NewPress()
             self:PerfStart()
-            self.active:Rotate(cfg)
+            self.active:Rotate(self:EffectiveConfig(cfg))
             self:PerfStop()
             UIErrorsFrame:Clear()
         elseif self.active.Prebuff then
@@ -2810,7 +2967,7 @@ function Aegis_SBR:RunRotation()
     -- at zero. No-op unless the probe log is enabled.
     if self.ProbeNoteCombo then self:ProbeNoteCombo() end
     self:PerfStart()
-    self.active:Rotate(cfg)
+    self.active:Rotate(self:EffectiveConfig(cfg))
     self:PerfStop()
     UIErrorsFrame:Clear()
 end
@@ -2823,6 +2980,15 @@ function Aegis_SBR:EvalCommand(msg)
     local cmd = string.lower(t[1] or "")
 
     if cmd == "" then self:RunRotation(); return end
+    -- Run this press in a stated mode. Two spam macros, "/sbr run single" and
+    -- "/sbr run aoe", switch the rotation by which one is being pressed - the
+    -- profile toggle stays as it is.
+    if cmd == "run" then
+        local sub = string.lower(t[2] or "")
+        if sub == "aoe" or sub == "single" then self:RunRotation(sub)
+        else self:RunRotation() end
+        return
+    end
     if cmd == "list"  then self:CmdList(); return end
     if cmd == "use"   then self:CmdUse(t[2]); return end
     if cmd == "off" or cmd == "none" then self:CmdOff(); return end
@@ -2898,6 +3064,21 @@ function Aegis_SBR:EvalCommand(msg)
         return
     end
     if cmd == "deps" or cmd == "components" then self:CmdDeps(); return end
+    if cmd == "move" or cmd == "movement" then
+        local sub = string.lower(t[2] or "")
+        if sub == "on" then
+            if AegisDB then AegisDB.moveDetect = true end
+            msgOut("movement detection ON: channels and cast-time spells wait until you stand still.")
+        elseif sub == "off" then
+            if AegisDB then AegisDB.moveDetect = false end
+            msgOut("movement detection OFF: everything is attempted regardless, the client decides.")
+        else
+            msgOut("movement detection is " .. (self:MoveDetectEnabled() and "on" or "off")
+                .. ". Use /sbr move on or /sbr move off.")
+        end
+        if Aegis_SBR_Minimap and Aegis_SBR_Minimap.RefreshPanel then Aegis_SBR_Minimap:RefreshPanel() end
+        return
+    end
     if cmd == "debug" then self:Debug(); return end
     if cmd == "talents" then self:Talents(); return end
     if cmd == "gobbo" then self:CmdGobbo(); return end
@@ -2955,7 +3136,7 @@ function Aegis_SBR:EvalCommand(msg)
     -- capturing a rotation trace to file, not something a player has any use
     -- for. It still works when typed, so it can be handed out on request when
     -- diagnosing a report ("/sbr log on, play a bit, /reload, send me the file").
-    msgOut("commands: ui, list, use, off, new, del, check, reset, acquire, minimap, deps, debug, talents, trace (plus class commands).")
+    msgOut("commands: ui, list, use, off, new, del, check, reset, acquire, run single|aoe, move, minimap, deps, debug, talents, trace (plus class commands).")
 end
 
 -- ============================================================
@@ -3011,7 +3192,11 @@ function Aegis_SBR:Deps()
     local out = {}
 
     local _, guid = UnitExists("player")
-    table.insert(out, { name = "SuperWoW", req = true,
+    -- The version is shown when the mod reports one (SUPERWOW_VERSION, a
+    -- global it sets), because features arrive by version: the CLICK
+    -- placement of area spells is 2.0 and later.
+    local swVer = (guid ~= nil) and SUPERWOW_VERSION and (" " .. tostring(SUPERWOW_VERSION)) or ""
+    table.insert(out, { name = "SuperWoW" .. swVer, req = true,
         ok = (guid ~= nil) and (SpellInfo ~= nil),
         why = "unit ids, cast events, casting on a unit without changing target" })
 

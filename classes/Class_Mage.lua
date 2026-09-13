@@ -35,7 +35,7 @@ local M = Aegis_SBR:NewClassModule("MAGE")
 M.uiTitle = "Mage"
 -- Rotate runs under Aegis_SBR:Preview without casting (see Pick/Later).
 M.previewReady = true
-M.uiHeight = 628
+M.uiHeight = 688
 M.meleeAutoAttack = false   -- caster, no white melee swing
 
 -- Chat output is shared in the core; this shim keeps call sites unchanged.
@@ -122,6 +122,9 @@ function M:NormalizeProfile(c)
     if c.healPrioTarget == nil then c.healPrioTarget = false end
     if type(c.healPrioList) ~= "table" then c.healPrioList = {} end
     if c.aoeMode == nil then c.aoeMode = false end
+    -- Off by default: the spell lands under the mouse, which asks something
+    -- of the player (see GroundSpell) that the rest of the AoE mode does not.
+    if c.useGroundAoe == nil then c.useGroundAoe = false end
     -- wand / leveling
     if c.useWand == nil then c.useWand = true end
     if c.wandHp == nil then c.wandHp = 40 end
@@ -187,7 +190,9 @@ function M:HasWand()
     return GetInventoryItemLink("player", 18) ~= nil
 end
 
--- Start the wand if it is not already auto-repeating.
+-- Start the wand if it is not already auto-repeating. The start cannot stop
+-- a wand that Wanding() failed to see (no Shoot button on any bar) where
+-- ClassicAPI offers a start-only cast; see Aegis_SBR:StartRepeating.
 function M:Wand()
     if self:Wanding() then return true end
     if not self:HasWand() then return false end
@@ -196,7 +201,7 @@ function M:Wand()
         p.spell = "Shoot"; p.reason = "wanding"
         return true
     end
-    CastSpellByName("Shoot")
+    Aegis_SBR:StartRepeating("Shoot")
     -- Same reason as Queue below: this calls the primitive directly, so it must
     -- do its own bookkeeping for OnCastError's refusal trace to see it.
     Aegis_SBR:NoteSpellCast("Shoot")
@@ -428,7 +433,7 @@ function M:Rotate(cfg)
     -- Everything below needs an attackable target.
     if not self:HasEnemy() then return end
 
-    if cfg.aoeMode then
+    if Aegis_SBR:AoeMode(cfg) then
         self:RotateAoE(cfg)
     elseif cfg.mode == "fire" then
         self:RotateFire(cfg)
@@ -574,16 +579,37 @@ function M:RotateArcane(cfg)
 end
 
 -- ------------------------------------------------------------
--- AoE (kiting): Frost Nova freeze, Cone of Cold snare, Icicles, then Arcane
--- Explosion as the PBAoE finisher. Ground-targeted AoE (Blizzard / Flamestrike)
--- is intentionally not auto-cast -- it needs a cursor click that cannot be
--- placed reliably from a one-button rotation.
+-- AoE (kiting): Frost Nova freeze, then the ground spell at the mouse when
+-- switched on, Cone of Cold snare, Icicles, then Arcane Explosion as the
+-- PBAoE finisher.
 -- ------------------------------------------------------------
+-- The ground spell of the spec: Flamestrike for fire, Blizzard otherwise -
+-- whichever of the two is learned when the first choice is not.
+function M:GroundSpell(cfg)
+    local first, second = "Blizzard", "Flamestrike"
+    if cfg.mode == "fire" then first, second = "Flamestrike", "Blizzard" end
+    if self:KnowsSpell(first) then return first end
+    if self:KnowsSpell(second) then return second end
+    return nil
+end
+
 function M:RotateAoE(cfg)
     -- Freeze the pack when it reaches melee.
     if cfg.useFrostNova and self:KnowsSpell("Frost Nova") and self:IsReady("Frost Nova")
         and self:InMeleeRange() then
         if self:Pick("Frost Nova", "melee range") then return end
+    end
+
+    -- Blizzard / Flamestrike, placed under the mouse (Aegis_SBR:CastAtMouse:
+    -- only while the mouse rests on an enemy). Sent through Queue so the
+    -- channel-after-channel timing above applies to Blizzard as well.
+    if cfg.useGroundAoe then
+        local g = self:GroundSpell(cfg)
+        if g and self:IsReady(g) then
+            if self:CastAtMouse(g, "AoE, under the mouse", function()
+                return self:Queue(g, "AoE, under the mouse")
+            end) then return end
+        end
     end
 
     -- Cone of Cold: snare + damage the pack in front of you (not range-gated in

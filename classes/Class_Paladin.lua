@@ -18,7 +18,7 @@ local M = Aegis_SBR:NewClassModule("PALADIN")
 M.uiTitle = "Paladin"
 -- Rotate runs under Aegis_SBR:Preview without casting (see Pick/Later).
 M.previewReady = true
-M.uiHeight = 820
+M.uiHeight = 850
 
 -- Chat output is shared in the core; this shim keeps call sites unchanged.
 local function msgOut(text, r, g, b) Aegis_SBR:Msg(text, r, g, b) end
@@ -559,6 +559,10 @@ function M:NormalizeProfile(c)
     -- Heal-mode mana upkeep. Self seal defaults on (free sustain); the group
     -- judge defaults off because it spends a GCD that cannot be a heal.
     if c.healManaSelf  == nil then c.healManaSelf  = true  end
+    -- Which seal the healer keeps and judges. Wisdom is the default, but in a
+    -- group somebody else may already be judging Wisdom onto the mob, and the
+    -- healer's contribution is then a different judgement - Light, typically.
+    if type(c.healSeal) ~= "string" or c.healSeal == "" then c.healSeal = "Seal of Wisdom" end
     if c.healManaJudge == nil then c.healManaJudge = false end
     -- Pre-load Holy Judgement during a lull. OFF by default: it is on the "adds
     -- casts" side, and a cast added to a healer's rotation is exactly the kind of
@@ -2275,24 +2279,44 @@ end
 -- with nothing targeted never refreshed it at all. That is the reported "Seal of
 -- Wisdom uptime is pretty bad sometimes": not a priority problem, a requirement
 -- that was never true for the thing it guarded.
+-- Refreshed only while actually SWINGING. The seal pays back through melee
+-- hits and nothing else, so a healer standing back with the seal running down
+-- has nothing to gain from a new one - reported as pointless Seal of Wisdom
+-- casts while merely having an enemy targeted. Auto-attack being on is the
+-- evidence that swings are happening; it is what the player's own hand-written
+-- macro tested, and it holds whether the current target is the mob or a
+-- friendly being healed.
+--
+-- This reverses an earlier reading that the seal should be kept up at all
+-- times because its uptime "was bad". Uptime while not swinging is not uptime
+-- that does anything.
 function M:HealSealUp(cfg)
     if not cfg.healManaSelf then return false end
-    if not self:KnowsSpell("Seal of Wisdom") then return false end
-    if self:HasBuff("Seal of Wisdom") then return false end
-    if not self:Affordable("Seal of Wisdom") then return false end
-    return self:Pick("Seal of Wisdom", "self mana")
+    local seal = cfg.healSeal or "Seal of Wisdom"
+    if not self:KnowsSpell(seal) then return false end
+    if self:HasBuff(seal) then return false end
+    if not self:Swinging() then return false end
+    if not self:Affordable(seal) then return false end
+    return self:Pick(seal, "seal for the swings")
+end
+
+-- Is auto-attack running? PlayerFrame.inCombat is the client's own flag for
+-- it on 1.12 - the attack icon's glow - and answers for any target.
+function M:Swinging()
+    return (PlayerFrame and PlayerFrame.inCombat) and true or false
 end
 
 -- Stamp Judgement of Wisdom on the mob, so the whole group gets mana back. This
 -- one really does need a target in melee range, and the seal on you to judge.
 function M:HealSeals(cfg)
     if not cfg.healManaJudge then return false end
-    if not self:KnowsSpell("Seal of Wisdom") then return false end
+    local seal = cfg.healSeal or "Seal of Wisdom"
+    if not self:KnowsSpell(seal) then return false end
     if not (UnitExists("target") and not UnitIsDead("target") and UnitCanAttack("player", "target")) then return false end
     if not self:InMeleeRange() then return false end
-    if not self:HasBuff("Seal of Wisdom") then return false end
+    if not self:HasBuff(seal) then return false end
     if cfg.healManaJudge and self:KnowsSpell("Judgement") and self:IsReady("Judgement")
-        and not self:DebuffEffectivelyUp("Seal of Wisdom") then
+        and not self:DebuffEffectivelyUp(seal) then
         if not self:Affordable("Judgement") then return false end
         return self:Pick("Judgement", "judge the seal")
     end

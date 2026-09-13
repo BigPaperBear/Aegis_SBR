@@ -16,6 +16,7 @@ function M:BuildBody(ui, parent)
     -- set(field) writes ui.buf[field]; slider frame names differ from their
     -- buf fields, so the layout key (frame name) and the field are passed apart.
     local function set(field) return function(v) if ui.buf then ui.buf[field] = v; ui:Refresh() end end end
+    L:MacroNote()
 
     L:Header("Damage over time")
     self.immoRow = L:Row{ key = "useImmolate", label = "Immolate", spell = "Immolate", onToggle = set("useImmolate") }
@@ -34,6 +35,9 @@ function M:BuildBody(ui, parent)
     self.petRow = L:Row{ key = "petAttack", label = "Send pet to attack", onToggle = set("petAttack") }
     self.petMeleeRow = L:Row{ key = "petMeleeOnly", label = "Pet melee only", onToggle = set("petMeleeOnly") }
     self.nightfallRow = L:Row{ key = "nightfall", label = "Shadow Bolt on Shadow Trance", spell = "Shadow Bolt", onToggle = set("nightfall") }
+
+    L:Header("Area (AoE press)")
+    self.rofRow = L:Row{ key = "useRainOfFire", label = "Rain of Fire at the mouse", spell = "Rain of Fire", onToggle = set("useRainOfFire") }
 
     L:Header("Mana (Life Tap)")
     self.tapRow = L:Row{ key = "lifeTap", label = "Use Life Tap", spell = "Life Tap", onToggle = set("lifeTap"),
@@ -75,6 +79,7 @@ function M:BuildBody(ui, parent)
     ui:Tip(self.petRow.cb, "Pet attack", "Send the active pet onto your target.")
     ui:Tip(self.petMeleeRow.cb, "Pet only in melee range", "Send the pet only when the target is within melee range,", "so an accidentally targeted far enemy does not pull the pet away.")
     ui:Tip(self.nightfallRow.cb, "Shadow Bolt on Shadow Trance", "When the Nightfall proc lights up, fire the free instant Shadow Bolt.", "Auto-enabled when the Nightfall talent is detected; this toggle forces it on otherwise. Only used when the filler is not already Shadow Bolt.")
+    ui:Tip(self.rofRow.cb, "Rain of Fire at the mouse", "On an AoE press (/sbr run aoe). Lands under the mouse: hold the mouse on the feet of the pack when pressing; with the mouse off any enemy the press skips it. Not while moving.")
     ui:Tip(self.tapRow.cb, "Life Tap", "Convert health to mana when mana is low and health is high.")
     ui:Tip(self.tapRow.slider, "Tap below mana", "Life Tap only when mana is under this value.")
     ui:Tip(self.tapHpRow.slider, "Keep HP above", "Life Tap only while health stays over this value.")
@@ -159,6 +164,7 @@ function M:RefreshBody(ui, buf)
         ui:Color(self.petMeleeRow.label, ui.COL.grey)
     end
     ui:BindCheck(self.nightfallRow, buf.nightfall)
+    ui:BindCheck(self.rofRow, buf.useRainOfFire, "Rain of Fire")
     ui:BindCheck(self.tapRow, buf.lifeTap)
 
     self.tapRow.slider:SetValue(buf.lifeTapMana or 0);  self.tapRow.slider.valText:SetText((buf.lifeTapMana or 0) .. "%")

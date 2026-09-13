@@ -33,7 +33,7 @@ local M = Aegis_SBR:NewClassModule("DRUID")
 M.uiTitle = "Druid"
 -- Rotate runs under Aegis_SBR:Preview without casting (see Pick/Later).
 M.previewReady = true
-M.uiHeight = 768
+M.uiHeight = 794
 -- Auto-attack is managed per form in this module instead of by the core, so a
 -- white swing is only started in Cat/Bear (where you melee) and never in
 -- caster/Moonkin (where you are casting). See EnsureMeleeSwing below.
@@ -131,6 +131,7 @@ function M:NormalizeProfile(c)
     if c.useDemo == nil then c.useDemo = true end
     if c.useMaul == nil then c.useMaul = true end
     if c.aoeSwipe == nil then c.aoeSwipe = false end
+    if c.useHurricane == nil then c.useHurricane = false end
     if c.useEnrage == nil then c.useEnrage = false end
     if c.hpManage == nil then c.hpManage = false end
     if c.hpLow == nil then c.hpLow = 35 end
@@ -649,14 +650,29 @@ function M:RotateCat(cfg)
         end
     end
 
-    -- P3 finisher at the combo threshold
+    -- P3 finisher at the combo threshold.
+    --
+    -- Chosen by what is LEARNED, not by style alone. The Shred branch used to
+    -- know only Ferocious Bite, and a cat that has not learned it yet (it comes
+    -- at 32) stood still at the threshold: the Automatic style put a normal mob
+    -- on that branch, so the fight was Claw to five points and then nothing.
+    -- Rip is the finisher the same cat does have, so it stands in when the
+    -- target can bleed; with no finisher learned at all the builder goes on
+    -- rather than the rotation stopping. Only "known but not affordable yet"
+    -- still waits, so a builder never eats the energy the finisher needs.
     if cp >= (cfg.cpFinish or 5) then
-        if bleed and canBleed and self:KnowsSpell("Rip") and not self:DebuffUp("Rip") then
-            if self:CanPay("Rip") and self:CastSafe("Rip") then return end
-        elseif self:CanPay("Ferocious Bite") then
-            if self:CastSafe("Ferocious Bite") then return end
+        local ripOK = canBleed and self:KnowsSpell("Rip") and not self:DebuffUp("Rip")
+        local biteOK = self:KnowsSpell("Ferocious Bite")
+        local fin
+        if bleed and ripOK then fin = "Rip"
+        elseif biteOK then fin = "Ferocious Bite"
+        elseif ripOK then fin = "Rip"
         end
-        return   -- at threshold but not affordable yet: wait, never waste a builder
+        if fin then
+            if self:CanPay(fin) and self:CastSafe(fin) then return end
+            return   -- at threshold but not affordable yet: wait, never waste a builder
+        end
+        -- no finisher this press can cast: fall through to the builder
     end
 
     -- P4 Rake upkeep (bleed style)
@@ -762,8 +778,37 @@ end
 -- combat form is learned: at low levels this degrades to Moonfire
 -- upkeep plus Wrath, exactly the right leveling caster loop.
 -- ============================================================
+-- The caster's one channel, and the only reason this module watches channels
+-- at all: Hurricane runs ten seconds and a press during it would clip it. The
+-- stop event also fires when the target dies; the ceiling guards a missed stop.
+local drChannelFrame = CreateFrame("Frame")
+drChannelFrame:RegisterEvent("SPELLCAST_CHANNEL_START")
+drChannelFrame:RegisterEvent("SPELLCAST_CHANNEL_STOP")
+drChannelFrame:SetScript("OnEvent", function()
+    if event == "SPELLCAST_CHANNEL_START" then
+        M.channeling = true; M.chanStart = GetTime()
+    elseif event == "SPELLCAST_CHANNEL_STOP" then
+        M.channeling = false
+    end
+end)
+
 function M:RotateCaster(cfg)
     local side = cfg.eclipse and self:EclipseSide() or nil
+
+    if self.channeling and self.chanStart and (GetTime() - self.chanStart) < 16 then
+        if self:Tracing() then self:Trace(string.format("STALL channel %.1fs", GetTime() - self.chanStart)) end
+        return
+    end
+
+    -- P0 Hurricane on an AoE press (/sbr run aoe) or with the AoE toggle on.
+    -- Placed under the mouse by the core (Aegis_SBR:CastAtMouse: only while
+    -- the mouse rests on an enemy).
+    if cfg.useHurricane and (Aegis_SBR:AoeMode(cfg) or cfg.aoeSwipe)
+        and self:KnowsSpell("Hurricane") and self:IsReady("Hurricane") then
+        if self:CastAtMouse("Hurricane", "AoE, under the mouse", function()
+            return self:QueueCast("Hurricane", "AoE, under the mouse")
+        end) then return end
+    end
 
     -- Out of combat the weave restarts from the configured nuke, so a pull
     -- always opens with the spell the profile asks for.

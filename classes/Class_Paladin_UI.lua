@@ -258,9 +258,10 @@ function M:BuildBody(ui, parent)
         end }
     end
 
-    L:Header("Mana management", "heal")
-    self.healManaSelfRow  = L:Row{ key = "healManaSelf",  label = "Seal of Wisdom (self mana)",  spell = "Seal of Wisdom", onToggle = set("healManaSelf") }
-    self.healManaJudgeRow = L:Row{ key = "healManaJudge", label = "Judge Wisdom (group mana)",   spell = "Seal of Wisdom", onToggle = set("healManaJudge") }
+    L:Header("Seal and judgement", "heal")
+    self.healSealDD       = L:Dropdown("healSeal", "Seal", 200, set("healSeal"))
+    self.healManaSelfRow  = L:Row{ key = "healManaSelf",  label = "Keep the seal up while swinging", onToggle = set("healManaSelf") }
+    self.healManaJudgeRow = L:Row{ key = "healManaJudge", label = "Judge it onto the mob",           onToggle = set("healManaJudge") }
     self.healJudgeHLRow   = L:Row{ key = "healJudgeHL",   label = "Pre-load Holy Judgement",     spell = "Judgement", onToggle = set("healJudgeHL") }
 
     -- Last section on every tab: which Goblin Brainwashing Device slot this
@@ -342,8 +343,9 @@ function M:BuildBody(ui, parent)
     ui:Tip(self.prioAddBtn, "Add target", "Adds your current target to the end of the priority list.", "Names, not raid slots, so the list survives a regroup. Typically the main tank first and yourself second.")
     ui:Tip(self.prioClearBtn, "Clear", "Empties the priority list.")
     ui:Tip(self.ratioHealthyRow.slider, "Holy Light below", "Holy Light is only used on a target under this health, and only when no Flash of Light is big enough to cover the deficit.", "60% is the recommended value. At 0 Holy Light is never used; at 100 it is used whenever the fast heal cannot cover the need. The Holy Judgement buff overrides it either way.")
-    ui:Tip(self.healManaSelfRow.cb, "Seal of Wisdom (self mana)", "In melee downtime, keep Seal of Wisdom up so your own swings return mana to you.", "Only fires when nobody needs healing, so it never delays a heal.")
-    ui:Tip(self.healManaJudgeRow.cb, "Judge Wisdom (group mana)", "Also judge Seal of Wisdom onto the mob (Judgement of Wisdom), so everyone attacking it gets mana back.", "Judgement uses a GCD and you cannot heal during that global, so it only fires when nobody needs healing.")
+    ui:Tip(self.healSealDD, "Seal", "The seal the healer keeps up and judges. Wisdom returns mana, Light returns health.", "Agree it with the other paladins: a judgement already on the mob is one the group has, and yours is better spent on a different one.")
+    ui:Tip(self.healManaSelfRow.cb, "Keep the seal up while swinging", "Refreshes the chosen seal on you - but only while auto-attack is running, since the seal only pays back through hits.", "Only fires when nobody needs healing, so it never delays a heal.")
+    ui:Tip(self.healManaJudgeRow.cb, "Judge it onto the mob", "Judges the chosen seal onto the target so everyone attacking it benefits.", "Judgement uses a GCD and you cannot heal during that global, so it only fires when nobody needs healing.")
     ui:Tip(self.healJudgeHLRow.cb, "Pre-load Holy Judgement", "With the Holy Judgement talent, casting Judgement makes your NEXT Holy Light one second faster. This casts it during downtime so the speed-up is already banked when the next big heal is needed.", "Downtime only. Judging to speed up a heal already due would cost a global cooldown: 1.5s + 1.5s is slower than the plain 2.5s heal. 'Judge Wisdom' above grants the same buff anyway.")
 end
 
@@ -507,11 +509,13 @@ function M:RefreshBody(ui, buf)
     end
     ui:SliderEnable(self.consecCountRow.slider, buf.spells.consecration and true or false)
 
-    -- Heal-mode mana upkeep. Both need Seal of Wisdom; shown OFF and greyed while
-    -- it is not learned, without touching the stored value.
-    local sowKnown = self:KnowsSpell("Seal of Wisdom")
-    ui:BindCheck(self.healManaSelfRow,  buf.healManaSelf  and sowKnown, "Seal of Wisdom")
-    ui:BindCheck(self.healManaJudgeRow, buf.healManaJudge and sowKnown, "Seal of Wisdom")
+    -- Heal-mode seal. Both switches need the chosen seal; shown OFF and greyed
+    -- while it is not learned, without touching the stored value.
+    local hseal = buf.healSeal or "Seal of Wisdom"
+    sealDD(self.healSealDD, self.DEBUFF_SEALS, hseal)
+    local sowKnown = self:KnowsSpell(hseal)
+    ui:BindCheck(self.healManaSelfRow,  buf.healManaSelf  and sowKnown, hseal)
+    ui:BindCheck(self.healManaJudgeRow, buf.healManaJudge and sowKnown, hseal)
     ui:BindCheck(self.healJudgeHLRow, buf.healJudgeHL)
 
     local hsv = buf.hsMinHP or 100

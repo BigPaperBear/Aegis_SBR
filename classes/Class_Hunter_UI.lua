@@ -3,16 +3,25 @@
 -- Builds and binds only the hunter specific controls. The shared
 -- window shell and profile management live in Aegis_SBR_UI.lua.
 -- Uses the shell's scroll layout (M.useScrollLayout).
+--
+-- One tab per spec - Beast Mastery, Marksmanship, Survival - because that is
+-- how a hunter is built on this server: the two shooting specs and the one
+-- melee spec, no hybrid. Every tab has the same shape, top to bottom:
+--   aspect (with the range switch)  ->  the spec's own attacks as a
+--   single / AoE table  ->  the attacks of the other range, for when distance
+--   forces them  ->  the spec's special abilities  ->  pet  ->  cooldowns.
+-- Each tab edits its own layer of the profile (Class_Hunter.lua, SpecConfig),
+-- so a change on one tab never reaches another.
 -- ============================================================
 
 local M = Aegis_SBR.classes.HUNTER
 M.useScrollLayout = true
 M.specTabs = {
-    field = "mode", default = "ranged",
+    field = "spec", default = "bm",
     tabs = {
-        { key = "auto",   label = "Auto",   tip1 = "Picks ranged vs melee by your distance to the target each press." },
-        { key = "ranged", label = "Ranged", tip1 = "Auto Shot + Steady Shot weave (BM / MM)." },
-        { key = "melee",  label = "Melee",  tip1 = "Aspect of the Wolf, swings, Raptor Strike, Mongoose Bite (Survival / BM-melee)." },
+        { key = "bm",   label = "Beast Mastery", tip1 = "Ranged, built around the pet: Kill Command, Baited Shot, Bestial Wrath." },
+        { key = "mm",   label = "Marksmanship",  tip1 = "Ranged: Aimed Shot, Lock and Load, Steady Shot weave." },
+        { key = "surv", label = "Survival",      tip1 = "Melee: Raptor Strike, Mongoose Bite, Lacerate, traps placed in combat." },
     },
 }
 
@@ -21,107 +30,221 @@ M.specTabs = {
 -- ============================================================
 function M:BuildBody(ui, parent)
     local L = ui:NewLayout(parent)
-    local function set(key) return function(v) if ui.buf then ui.buf[key] = v; ui:Refresh() end end end
 
-    L:Header("Targeting")
-    self.markRow = L:Row{ key = "useHuntersMark", label = "Hunter's Mark", spell = "Hunter's Mark", onToggle = set("useHuntersMark") }
-    self.stingDD = L:Dropdown("sting", "Sting", 180, set("sting"))
+    -- The layer the current tab edits: the spec's own sparse set, with its own
+    -- AoE set inside. Reads fall back to the base, so a tab shows the base value
+    -- until it is changed there.
+    local function layer(buf)
+        local sp = buf.spec
+        if sp ~= "bm" and sp ~= "mm" and sp ~= "surv" then sp = "bm" end
+        if type(buf[sp]) ~= "table" then buf[sp] = {} end
+        if type(buf[sp].aoe) ~= "table" then buf[sp].aoe = {} end
+        return buf[sp]
+    end
+    M.layerOf = layer
+    local function set(key) return function(v) if ui.buf then layer(ui.buf)[key] = v; ui:Refresh() end end end
+    local function setAoe(key) return function(v) if ui.buf then layer(ui.buf).aoe[key] = v; ui:Refresh() end end end
 
-    self.rangedSection = L:Header("Ranged Shots", { ranged = true, auto = true })
-    self.steadyRow = L:Row{ key = "useSteadyShot", label = "Steady Shot", spell = "Steady Shot", onToggle = set("useSteadyShot") }
-    self.arcaneRow = L:Row{ key = "useArcaneShot", label = "Arcane Shot", spell = "Arcane Shot", onToggle = set("useArcaneShot") }
-    self.multiRow = L:Row{ key = "useMultiShot", label = "Multi-Shot", spell = "Multi-Shot", onToggle = set("useMultiShot") }
-    self.aimedRow = L:Row{ key = "useAimedShot", label = "Aimed Shot", spell = "Aimed Shot", onToggle = set("useAimedShot") }
-    self.aimedProcRow = L:Row{ key = "aimedOnlyOnProc", label = "Aimed only on L&L", onToggle = set("aimedOnlyOnProc") }
-    self.aimedOpenerRow = L:Row{ key = "useAimedOpener", label = "Aimed opener (pre-pull)", onToggle = set("useAimedOpener") }
+    -- Table rows. `key` names the profile field; `id` keeps the frame names
+    -- unique where the same field appears on more than one tab.
+    -- The AoE column inherits the single value until it has one of its own,
+    -- which is right for display and for the rotation - but it means the first
+    -- flip of the SINGLE switch would drag the AoE column along with it. So the
+    -- single handler first pins the AoE value at what the column was showing,
+    -- and only then changes the single one: from the first edit on, the two
+    -- are independent.
+    local function setSingle(key)
+        return function(v)
+            if not ui.buf then return end
+            local lay = layer(ui.buf)
+            if lay.aoe[key] == nil then
+                local cur = lay[key]
+                if cur == nil then cur = ui.buf[key] end
+                lay.aoe[key] = cur and true or false
+            end
+            lay[key] = v
+            ui:Refresh()
+        end
+    end
+    local function both(id, key, label, spell)
+        return L:Row2{ key = id, label = label, spell = spell, onSingle = setSingle(key), onAoe = setAoe(key) }
+    end
+    local function singleOnly(id, key, label, spell)
+        return L:Row2{ key = id, label = label, spell = spell, onSingle = set(key) }
+    end
+    local function aoeOnly(id, key, label, spell)
+        return L:Row2{ key = id, label = label, spell = spell, onAoe = setAoe(key) }
+    end
 
-    L:Header("AoE & Survival")
-    self.volleyRow = L:Row{ key = "useVolley", label = "Volley leads AoE", spell = "Volley", onToggle = set("useVolley") }
-    self.trapRow = L:Row{ key = "useImmolationTrap", label = "Immolation Trap", spell = "Immolation Trap", onToggle = set("useImmolationTrap") }
+    L:MacroNote()
 
-    self.meleeSection = L:Header("Melee", { melee = true, auto = true })
-    self.raptorRow = L:Row{ key = "useRaptorStrike", label = "Raptor Strike", spell = "Raptor Strike", onToggle = set("useRaptorStrike") }
-    self.mongooseRow = L:Row{ key = "useMongooseBite", label = "Mongoose Bite", spell = "Mongoose Bite", onToggle = set("useMongooseBite") }
-    self.wingRow = L:Row{ key = "useWingClip", label = "Wing Clip", spell = "Wing Clip", onToggle = set("useWingClip") }
-    self.lacerateRow = L:Row{ key = "useLacerate", label = "Lacerate bleed", spell = "Lacerate", onToggle = set("useLacerate") }
-    self.carveRow = L:Row{ key = "useCarve", label = "Carve (melee AoE)", spell = "Carve", onToggle = set("useCarve") }
-
+    -- ---------------------------------------------------------------- 1. aspect
     L:Header("Aspect")
-    self.aspectRow = L:Row{ key = "useAspect", label = "Combat aspect",
-        sub = "automatic Hawk / Wolf - switch off to choose your own", onToggle = set("useAspect") }
-    self.rangedAspDD = L:Dropdown("rangedAspect", "Ranged aspect", 180, set("rangedAspect"))
-    self.meleeAspDD = L:Dropdown("meleeAspect", "Melee aspect", 180, set("meleeAspect"))
+    self.aspectRow = L:Row{ key = "useAspect", label = "Keep the combat aspect up", onToggle = set("useAspect") }
+    self.rangedAspDD = L:Dropdown("rangedAspect", "At range", 180, set("rangedAspect"))
+    self.meleeAspDD = L:Dropdown("meleeAspect", "In melee", 180, set("meleeAspect"))
+    self.rangeSwitchRow = L:Row{ key = "rangeSwitch", label = "Switch attacks by distance", onToggle = set("rangeSwitch") }
     self.manaAspRow = L:Row{ key = "useManaAspect", label = "Viper below",
         spell = "Aspect of the Viper", onToggle = set("useManaAspect"),
         slider = { key = "manaAspectPct", min = 0, max = 90, step = 5, suffix = "%", onChange = set("manaAspectPct") } }
     self.manaBackRow = L:Row{ label = "Back to combat at",
         slider = { key = "manaAspectBackPct", min = 5, max = 100, step = 5, suffix = "%", onChange = set("manaAspectBackPct") } }
 
+    -- ---------------------------------------------------------------- 2. the spec's own attacks
+    -- Shooting specs: the ranged table is primary.
+    L:Header("Ranged attacks", { bm = true, mm = true })
+    L:ColumnHeads("single", "aoe")
+    self.stingDD   = L:Dropdown("sting", "Sting", 180, set("sting"))
+    self.markRow   = both("r_mark", "useHuntersMark", "Hunter's Mark", "Hunter's Mark")
+    self.steadyRow = both("r_steady", "useSteadyShot", "Steady Shot", "Steady Shot")
+    self.arcaneRow = both("r_arcane", "useArcaneShot", "Arcane Shot", "Arcane Shot")
+    self.multiRow  = both("r_multi", "useMultiShot", "Multi-Shot", "Multi-Shot")
+    self.aimedRow  = both("r_aimed", "useAimedShot", "Aimed Shot", "Aimed Shot")
+    self.volleyRow = both("r_volley", "useVolley", "Volley", "Volley")
+    self.trapRow      = singleOnly("r_immo", "useImmolationTrap", "Immolation Trap", "Immolation Trap")
+    self.explosiveRow = aoeOnly("r_expl", "useExplosiveTrap", "Explosive Trap", "Explosive Trap")
+    self.aimedProcRow = L:Row{ key = "aimedOnlyOnProc", label = "Aimed only on Lock and Load", onToggle = set("aimedOnlyOnProc") }
+    self.aimedOpenerRow = L:Row{ key = "useAimedOpener", label = "Aimed opener (pre-pull)", onToggle = set("useAimedOpener") }
+
+    -- Survival: the melee table is primary.
+    L:Header("Melee attacks", { surv = true })
+    L:ColumnHeads("single", "aoe")
+    self.raptorRow   = both("s_raptor", "useRaptorStrike", "Raptor Strike", "Raptor Strike")
+    self.mongooseRow = both("s_mongoose", "useMongooseBite", "Mongoose Bite", "Mongoose Bite")
+    self.lacerateRow = both("s_lacerate", "useLacerate", "Lacerate", "Lacerate")
+    self.carveRow    = both("s_carve", "useCarve", "Carve", "Carve")
+    self.wingRow     = both("s_wing", "useWingClip", "Wing Clip", "Wing Clip")
+    self.trapRow2      = singleOnly("s_immo", "useImmolationTrap", "Immolation Trap", "Immolation Trap")
+    self.explosiveRow2 = aoeOnly("s_expl", "useExplosiveTrap", "Explosive Trap", "Explosive Trap")
+
+    -- ---------------------------------------------------------------- 3. the other range
+    -- What a shooting spec does once the mob is on it. Lacerate and Carve are
+    -- Survival talents and do not appear here.
+    L:Header("Melee, when closed on", { bm = true, mm = true })
+    L:ColumnHeads("single", "aoe")
+    self.raptorRow2   = both("m_raptor", "useRaptorStrike", "Raptor Strike", "Raptor Strike")
+    self.mongooseRow2 = both("m_mongoose", "useMongooseBite", "Mongoose Bite", "Mongoose Bite")
+    self.wingRow2     = both("m_wing", "useWingClip", "Wing Clip", "Wing Clip")
+
+    -- What Survival does while the mob is still out of reach.
+    L:Header("Ranged, when out of reach", { surv = true })
+    L:ColumnHeads("single", "aoe")
+    self.stingDD2   = L:Dropdown("sting2", "Sting", 180, set("sting"))
+    self.markRow2   = both("o_mark", "useHuntersMark", "Hunter's Mark", "Hunter's Mark")
+    self.arcaneRow2 = both("o_arcane", "useArcaneShot", "Arcane Shot", "Arcane Shot")
+    self.multiRow2  = both("o_multi", "useMultiShot", "Multi-Shot", "Multi-Shot")
+
+    -- ---------------------------------------------------------------- 4. spec abilities
+    L:Header("Beast Mastery", { bm = true })
+    self.kcRow = L:Row{ key = "useKillCommand", label = "Kill Command", spell = "Kill Command", onToggle = set("useKillCommand") }
+    self.baitedRow = L:Row{ key = "useBaitedShot", label = "Baited Shot on pet crit", spell = "Baited Shot", onToggle = set("useBaitedShot") }
+    -- The spec's own cooldown, a talent: it belongs with the spec, not in the
+    -- shared list below, where the other two tabs would only show it unlearned.
+    self.bwRow = L:Row{ key = "useBestialWrath", label = "Bestial Wrath with cooldowns", spell = "Bestial Wrath", onToggle = set("useBestialWrath") }
+
+    -- ---------------------------------------------------------------- 5. pet
     L:Header("Pet")
     self.petRow = L:Row{ key = "petAttack", label = "Send pet to attack", onToggle = set("petAttack") }
+    self.petMeleeRow = L:Row{ key = "petMeleeOnly", label = "Pet only in melee range", onToggle = set("petMeleeOnly") }
     self.mendRow = L:Row{ key = "useMendPet", label = "Mend Pet", spell = "Mend Pet", onToggle = set("useMendPet"),
         slider = { key = "mendPetHp", min = 0, max = 100, step = 5, suffix = "%", onChange = set("mendPetHp") } }
     self.tauntRow = L:Row{ key = "petTaunt", label = "Pet taunt", spell = "Growl", onToggle = set("petTaunt") }
-    self.kcRow = L:Row{ key = "useKillCommand", label = "Kill Command", spell = "Kill Command", onToggle = set("useKillCommand") }
-    self.baitedRow = L:Row{ key = "useBaitedShot", label = "Baited Shot on pet crit", spell = "Baited Shot", onToggle = set("useBaitedShot") }
     -- A window, not a rotation setting, so it writes to the pet module directly
-    -- and lives per character rather than per profile - the same arrangement the
-    -- rogue's poison rows use for the shared upkeep module.
+    -- and lives per character rather than per profile.
     self.petWinRow = L:Row{ key = "petWindow", label = "Show pet window", onToggle = function(on)
         if Aegis_SBR_Pet then Aegis_SBR_Pet:SetShown(on) end
     end }
 
+    -- ---------------------------------------------------------------- 6. cooldowns
+    -- WHEN the cooldowns fire, then WHICH ones - each listed and switchable on
+    -- its own, like everything else on the tab.
     L:Header("Cooldowns")
-    self.cdRow = L:Row{ key = "popCDs", label = "Pop cooldowns", onToggle = set("popCDs") }
-    self.cdEliteRow = L:Row{ key = "autoCDElite", label = "Auto on elite", onToggle = set("autoCDElite") }
-    self.bwRow = L:Row{ key = "useBestialWrath", label = "Bestial Wrath",
-        spell = "Bestial Wrath", onToggle = set("useBestialWrath") }
+    self.cdRow = L:Row{ key = "popCDs", label = "Pop cooldowns every press", onToggle = set("popCDs") }
+    self.cdEliteRow = L:Row{ key = "autoCDElite", label = "Pop on elites and bosses", onToggle = set("autoCDElite") }
+    self.rfRow = L:Row{ key = "useRapidFire", label = "Rapid Fire", spell = "Rapid Fire", onToggle = set("useRapidFire") }
+
+    -- (7. defensive cooldowns: not built yet - its triggers are still to be
+    --  decided. Feign Death cancels everything, so a wrong trigger is worse than
+    --  none.)
 
     -- Last section on every tab: which Goblin Brainwashing Device slot this
-    -- tab answers to. Untagged, so it shows on all of them and always reports
-    -- the tab you are looking at.
+    -- tab answers to.
     ui:BuildGobboRow(L)
 
     L:Finish()
 
-    ui:Tip(self.tauntRow.cb, "Smart Pet Taunt", "When the mob peels off your pet onto you, sends the pet's Growl to grab it back (throttled). Off by default; leave it off for melee-weave builds where you want aggro.")
-    ui:Tip(self.markRow.cb, "Hunter's Mark", "Applied once per target and refreshed when it falls off.")
-    ui:Tip(self.stingDD, "Sting", "The one sting kept up. Serpent is the staple DoT; Scorpid lowers melee hit; Viper drains mana. \"Viper > Serpent\" uses Viper Sting against mana users and falls back to Serpent Sting for everything else.")
-    ui:Tip(self.steadyRow.cb, "Steady Shot", "Baseline at level 20. The 1:1 weave after each Auto Shot and the main filler. Queued so it does not clip the shot.")
-    ui:Tip(self.arcaneRow.cb, "Arcane Shot", "Instant, weaved on cooldown between Auto Shots.")
-    ui:Tip(self.multiRow.cb, "Multi-Shot", "On cooldown. Also leads AoE with Volley.")
-    ui:Tip(self.aimedRow.cb, "Aimed Shot", "Only fired when Lock and Load procs (cast time drop + line cleave), so it never clips Auto Shot.")
-    ui:Tip(self.aimedProcRow.cb, "Aimed only on Lock and Load", "Recommended on. Turn off to also hard-cast Aimed Shot on cooldown (will clip Auto Shot).")
-    ui:Tip(self.aimedOpenerRow.cb, "Aimed Shot opener", "Open the pull with a hard-cast Aimed Shot before combat, then never clip Auto Shot during the fight.")
-    ui:Tip(self.volleyRow.cb, "Volley", "When AoE mode is on (/sbr aoe), Volley leads then Multi-Shot fills.")
-    ui:Tip(self.trapRow.cb, "Immolation Trap", "Survival: dropped on cooldown. Patch 1.18.1 allows traps in combat.")
-    ui:Tip(self.raptorRow.cb, "Raptor Strike", "Melee on-next-swing strike, used on cooldown in melee mode.")
-    ui:Tip(self.mongooseRow.cb, "Mongoose Bite", "An instant melee attack, used on its five second cooldown. 45% weapon damage plus a little, and it strikes with both weapons while dual wielding.", "It carries no dodge requirement on this client: the vanilla rule that it only follows a dodge does not apply here, so it goes out whenever the cooldown is up and you are in melee range.")
-    ui:Tip(self.wingRow.cb, "Wing Clip", "Optional melee slow / kite tool.")
-    ui:Tip(self.lacerateRow.cb, "Lacerate", "Melee bleed, kept rolling on the target in melee mode.")
-    ui:Tip(self.carveRow.cb, "Carve", "Melee AoE strike. Leads the melee priority when AoE mode is on (/sbr aoe).")
-    ui:Tip(self.aspectRow.cb, "Combat aspect", "Keeps the aspect you pick for each stance up (Hawk ranged / Wolf melee by default).", "Switch it OFF and the rotation never touches your aspect at all - the mana swap below included - so you can pick one yourself and it stays. That is the way to run an aspect the rotation has no use for, such as Aspect of the Beast.")
-    ui:Tip(self.rangedAspDD, "Ranged aspect", "The combat aspect kept up in ranged mode. Default Hawk (+ranged AP); pick any learned aspect, e.g. Viper to keep mana regen as your main aspect.")
-    ui:Tip(self.meleeAspDD, "Melee aspect", "The combat aspect kept up in melee mode. Default Wolf (+melee AP); pick any learned aspect, e.g. Viper to keep mana regen as your main aspect.")
-    ui:Tip(self.manaAspRow.cb, "Mana aspect swap", "Swap to Aspect of the Viper when mana drops below the first value, then back to your combat aspect (Hawk ranged / Wolf melee) once mana recovers to the second value.", "Needs Aspect of the Viper, which is learned at level 56. Before that there is nothing to swap to and this does nothing - no other aspect returns mana.")
+    -- ---------------------------------------------------------------- tooltips
+    ui:Tip(self.aspectRow.cb, "Keep the combat aspect up", "Keeps the aspect chosen below up - the ranged one at range, the melee one in melee.", "Switch it OFF and the rotation never touches your aspect at all, the mana swap included - so you can pick one yourself and it stays.")
+    ui:Tip(self.rangedAspDD, "At range", "The aspect kept up while shooting. Hawk by default.")
+    ui:Tip(self.meleeAspDD, "In melee", "The aspect kept up while fighting in melee. Wolf by default.")
+    ui:Tip(self.rangeSwitchRow.cb, "Switch attacks by distance", "Lets your distance to the target decide, press by press: a shooting spec that has been closed on uses its melee attacks below, a melee spec kept at range uses its shots.", "Off, the spec's own range is used regardless. The aspect follows the same decision.")
+    ui:Tip(self.manaAspRow.cb, "Mana aspect swap", "Swap to Aspect of the Viper when mana drops below the first value, then back to the combat aspect once mana recovers to the second.", "Needs Aspect of the Viper, learned at level 56.")
     ui:Tip(self.manaAspRow.slider, "Viper below", "Drop to Aspect of the Viper when your mana falls under this percent.")
-    ui:Tip(self.manaBackRow.slider, "Back to combat at", "Swap back to Aspect of the Hawk/Wolf once mana recovers to this percent. Set it above the 'Viper below' value.")
+    ui:Tip(self.manaBackRow.slider, "Back to combat at", "Swap back once mana recovers to this percent. Set it above the 'Viper below' value.")
+
+    local function stingTip(dd) ui:Tip(dd, "Sting", "The one sting kept up. Serpent is the staple DoT; Scorpid lowers melee hit; Viper drains mana. \"Viper > Serpent\" uses Viper Sting against mana users and Serpent Sting for everything else.") end
+    stingTip(self.stingDD); stingTip(self.stingDD2)
+    local function markTip(row) ui:Tip(row.cb, "Hunter's Mark", "Applied once per target and refreshed when it falls off.", "Off in the AoE column by default: one mark per mob is a press each that a pack does not repay.") end
+    markTip(self.markRow); markTip(self.markRow2)
+    ui:TipRow(self.steadyRow, "Steady Shot", "The 1:1 weave after each Auto Shot and the main filler. Queued so it does not clip the shot.")
+    local function arcaneTip(row) ui:Tip(row.cb, "Arcane Shot", "Instant, weaved on cooldown between Auto Shots.") end
+    arcaneTip(self.arcaneRow); arcaneTip(self.arcaneRow2)
+    local function multiTip(row) ui:Tip(row.cb, "Multi-Shot", "On cooldown. Leads AoE together with Volley.") end
+    multiTip(self.multiRow); multiTip(self.multiRow2)
+    ui:TipRow(self.aimedRow, "Aimed Shot", "Only fired when Lock and Load procs (cast time drop + line cleave), so it never clips Auto Shot.")
+    ui:Tip(self.aimedProcRow.cb, "Aimed only on Lock and Load", "Recommended on. Off, Aimed Shot is also hard-cast on cooldown, which clips Auto Shot.")
+    ui:Tip(self.aimedOpenerRow.cb, "Aimed Shot opener", "Open the pull with a hard-cast Aimed Shot before combat, then never clip Auto Shot during the fight.")
+    ui:TipRow(self.volleyRow, "Volley", "Lands under the mouse. Hold the mouse on the feet of the pack when pressing; with the mouse off any enemy the press skips Volley.")
+    local function immoTip(row) ui:Tip(row.cb, "Immolation Trap", "Dropped on cooldown against a single target.", "In combat only with the Untamed Trapper talent - that is what allows a trap to be placed while fighting. Without it, only on the pull.") end
+    immoTip(self.trapRow); immoTip(self.trapRow2)
+    local function explTip(row) ui:Tip(row.cb, "Explosive Trap", "Dropped on cooldown on an AoE press, alongside Carve or Volley.", "In combat only with the Untamed Trapper talent.") end
+    explTip(self.explosiveRow); explTip(self.explosiveRow2)
+    local function raptorTip(row) ui:Tip(row.cb, "Raptor Strike", "On-next-swing strike, sent whenever it is ready - it spends no global cooldown, so it goes out alongside the other melee attacks.") end
+    raptorTip(self.raptorRow); raptorTip(self.raptorRow2)
+    local function mongooseTip(row) ui:Tip(row.cb, "Mongoose Bite", "Instant melee attack, used on its cooldown.", "No dodge requirement on this client.") end
+    mongooseTip(self.mongooseRow); mongooseTip(self.mongooseRow2)
+    local function wingTip(row) ui:Tip(row.cb, "Wing Clip", "Optional melee slow / kite tool.") end
+    wingTip(self.wingRow); wingTip(self.wingRow2)
+    ui:TipRow(self.lacerateRow, "Lacerate", "An 8 second bleed on a 10 second cooldown, re-applied when it falls off.", "Only usable after you critically strike the target: it is armed by a crit of yours and stands down again when the client refuses it, until the next crit.")
+    ui:TipRow(self.carveRow, "Carve", "Melee cone. Leads the melee attacks on an AoE press; a single-target filler otherwise.")
+
+    -- The AoE column, one tooltip for all of it.
+    for _, row in pairs({ self.markRow, self.steadyRow, self.arcaneRow, self.multiRow, self.aimedRow, self.volleyRow,
+                          self.raptorRow, self.mongooseRow, self.lacerateRow, self.carveRow, self.wingRow,
+                          self.raptorRow2, self.mongooseRow2, self.wingRow2,
+                          self.markRow2, self.arcaneRow2, self.multiRow2 }) do
+        if row.cb2 then
+            ui:Tip(row.cb2, "AoE column",
+                "This switch as an AoE press reads it - /sbr aoe on, or a /sbr run aoe macro. The left column is what a single-target press reads.",
+                "The AoE column belongs to this tab alone.")
+        end
+    end
+
+    ui:Tip(self.kcRow.cb, "Kill Command", "Fired the moment it becomes usable - the client only allows it after you land a critical strike.")
+    ui:Tip(self.baitedRow.cb, "Baited Shot", "Fired in the short window after your pet lands a critical strike.")
+    ui:Tip(self.rfRow.cb, "Rapid Fire", "Included when cooldowns fire. At range only - it speeds up ranged attacks and nothing else, so in melee it is kept for when you step back.")
+    ui:Tip(self.bwRow.cb, "Bestial Wrath", "Fires together with the cooldowns (see the Cooldowns section for when). Skipped without a live pet - it grants the pet Scent of Blood, and with no pet out the two minutes are spent on nothing.")
     ui:Tip(self.petRow.cb, "Pet attack", "Sends your pet onto the target each press.")
-    ui:Tip(self.petWinRow.cb, "Show pet window", "A small movable readout: level, experience toward the next level, and happiness, with the border coloured green, yellow or red so the state reaches you across the screen.", "The point is a window small enough to leave up. Deliberately no countdown to the next loyalty level: the client exposes no progress within a level, and a measured one restarted at every zone change.")
+    ui:Tip(self.petMeleeRow.cb, "Pet only in melee range", "Only send the pet when the target is within melee range of you, so a far target does not pull it away.")
     ui:Tip(self.mendRow.cb, "Mend Pet", "Heals the pet below the slider value (HoT, refreshed ~12s).")
     ui:Tip(self.mendRow.slider, "Mend Pet below", "Pet health percent under which Mend Pet is cast.")
-    ui:Tip(self.kcRow.cb, "Kill Command", "Beast Mastery: fired on cooldown while in combat.")
-    ui:Tip(self.baitedRow.cb, "Baited Shot", "Fired in the short window after your pet lands a critical strike.")
-    ui:Tip(self.cdRow.cb, "Pop cooldowns", "Use your burst cooldowns every press: Rapid Fire, and Bestial Wrath if its own switch below is on.")
-    ui:Tip(self.bwRow.cb, "Bestial Wrath", "Included when cooldowns fire, and only then - this switch decides whether the pet cooldown comes along with Rapid Fire.", "Skipped without a live pet. It grants the pet Scent of Blood for 18 seconds, which is that talent's own proc: 40% additional damage, dealt by the pet. With no pet out the whole two-minute cooldown is spent on nothing.")
-    ui:Tip(self.cdEliteRow.cb, "Auto on elite", "Pop the cooldowns only against elite and boss targets.")
+    ui:Tip(self.tauntRow.cb, "Smart Pet Taunt", "When the mob peels off your pet onto you, sends the pet's Growl to grab it back (throttled). Leave it off for melee builds where you want the aggro.")
+    ui:Tip(self.petWinRow.cb, "Show pet window", "A small movable readout: level, experience toward the next level, and happiness.")
+    ui:Tip(self.cdRow.cb, "Pop cooldowns every press", "Fires the cooldowns listed below whenever they are ready, on every target - and the spec's own, such as Bestial Wrath, where its switch is on.")
+    ui:Tip(self.cdEliteRow.cb, "Pop on elites and bosses", "Fires the cooldowns listed below against elite and boss targets, without the switch above.")
 end
 
 -- ============================================================
 -- refresh body (hunter binding)
 -- ============================================================
 function M:RefreshBody(ui, buf)
-    -- sting dropdown: None plus the stings the hunter actually knows, plus the
+    -- The tab's own values where set, the base otherwise.
+    local lay = M.layerOf and M.layerOf(buf) or buf
+    local aoe = (type(lay.aoe) == "table") and lay.aoe or {}
+    local function get(k) local v = lay[k]; if v == nil then v = buf[k] end; return v end
+    local function av(k) local v = aoe[k]; if v == nil then v = get(k) end; return v end
+
+    -- sting dropdowns: None plus the stings the hunter actually knows, plus the
     -- smart "Viper > Serpent" option when both stings are known
     local o = { { label = "None", value = "" } }
     local avail = self:AvailableStingsOf()
@@ -129,94 +252,84 @@ function M:RefreshBody(ui, buf)
     if self:KnowsSpell("Viper Sting") and self:KnowsSpell("Serpent Sting") then
         table.insert(o, { label = "Viper > Serpent", value = "Viper > Serpent" })
     end
-    local cur = buf.sting or ""
+    local cur = get("sting") or ""
     local shown, c
     if cur == "" then shown, c = "None", ui.COL.white
     elseif cur == "Viper > Serpent" then shown, c = "Viper > Serpent", ui.COL.white
     elseif self:KnowsSpell(cur) then shown, c = cur, ui.COL.white
     else shown, c = cur .. " (not learned)", ui.COL.red end
     ui:SetDropdown(self.stingDD, o, cur, shown, c)
+    ui:SetDropdown(self.stingDD2, o, cur, shown, c)
 
-    ui:BindCheck(self.markRow, buf.useHuntersMark)
-    ui:BindCheck(self.steadyRow, buf.useSteadyShot)
-    ui:BindCheck(self.arcaneRow, buf.useArcaneShot)
-    ui:BindCheck(self.multiRow, buf.useMultiShot)
-    ui:BindCheck(self.aimedRow, buf.useAimedShot)
-    ui:BindCheck(self.volleyRow, buf.useVolley)
-    ui:BindCheck(self.trapRow, buf.useImmolationTrap)
-    ui:BindCheck(self.raptorRow, buf.useRaptorStrike)
-    ui:BindCheck(self.mongooseRow, buf.useMongooseBite)
-    ui:BindCheck(self.wingRow, buf.useWingClip)
-    ui:BindCheck(self.lacerateRow, buf.useLacerate)
-    ui:BindCheck(self.carveRow, buf.useCarve)
-    ui:BindCheck(self.aspectRow, buf.useAspect)
-
-    -- melee/ranged aspect pickers: the learned combat aspects only, so a low-level
-    -- hunter sees just the ones they can actually cast; a saved pick that is not yet
-    -- trained shows red "(not learned)" but keeps its value so it applies when trained.
+    -- aspect
+    ui:BindCheck(self.aspectRow, get("useAspect"))
+    ui:BindCheck(self.rangeSwitchRow, get("rangeSwitch"))
     local aopts = {}
     local aavail = self:AvailableAspectsOf()
     for i = 1, table.getn(aavail) do aopts[i] = { label = aavail[i], value = aavail[i] } end
     local function aspectDD(dd, v, dflt)
-        local cur = v or dflt
-        local shown, c
-        if self:KnowsSpell(cur) then shown, c = cur, ui.COL.white
-        else shown, c = cur .. " (not learned)", ui.COL.red end
-        ui:SetDropdown(dd, aopts, cur, shown, c)
+        local acur = v or dflt
+        local ashown, ac
+        if self:KnowsSpell(acur) then ashown, ac = acur, ui.COL.white
+        else ashown, ac = acur .. " (not learned)", ui.COL.red end
+        ui:SetDropdown(dd, aopts, acur, ashown, ac)
     end
-    aspectDD(self.rangedAspDD, buf.rangedAspect, "Aspect of the Hawk")
-    aspectDD(self.meleeAspDD, buf.meleeAspect, "Aspect of the Wolf")
+    aspectDD(self.rangedAspDD, get("rangedAspect"), "Aspect of the Hawk")
+    aspectDD(self.meleeAspDD, get("meleeAspect"), "Aspect of the Wolf")
+    ui:BindCheck(self.manaAspRow, get("useManaAspect"))
+    local viperOK = self:KnowsSpell("Aspect of the Viper")
+    ui:Color(self.manaBackRow.label, viperOK and ui.COL.white or ui.COL.grey)
+    local map = get("manaAspectPct") or 30
+    self.manaAspRow.slider:SetValue(map)
+    if self.manaAspRow.slider.valText then self.manaAspRow.slider.valText:SetText(map .. "%") end
+    ui:SliderEnable(self.manaAspRow.slider, (viperOK and get("useManaAspect")) and true or false)
+    local mback = get("manaAspectBackPct") or (map + 15)
+    self.manaBackRow.slider:SetValue(mback)
+    if self.manaBackRow.slider.valText then self.manaBackRow.slider.valText:SetText(mback .. "%") end
+    ui:SliderEnable(self.manaBackRow.slider, (viperOK and get("useManaAspect")) and true or false)
 
-    ui:BindCheck(self.manaAspRow, buf.useManaAspect)
-    ui:BindCheck(self.petRow, buf.petAttack)
-    if Aegis_SBR_Pet then self.petWinRow.cb:SetChecked(Aegis_SBR_Pet:Enabled()) end
-    ui:BindCheck(self.tauntRow, buf.petTaunt)
-    ui:BindCheck(self.mendRow, buf.useMendPet)
-    ui:BindCheck(self.kcRow, buf.useKillCommand)
-    ui:BindCheck(self.baitedRow, buf.useBaitedShot)
-    ui:BindCheck(self.cdRow, buf.popCDs)
-    ui:BindCheck(self.cdEliteRow, buf.autoCDElite)
-    ui:BindCheck(self.bwRow, buf.useBestialWrath)
+    -- the tables: every row of a field binds to the same value, whichever tab
+    -- shows it
+    local function b2(row, k) ui:BindCheck2(row, get(k), av(k)) end
+    b2(self.markRow, "useHuntersMark");     b2(self.markRow2, "useHuntersMark")
+    b2(self.steadyRow, "useSteadyShot")
+    b2(self.arcaneRow, "useArcaneShot");    b2(self.arcaneRow2, "useArcaneShot")
+    b2(self.multiRow, "useMultiShot");      b2(self.multiRow2, "useMultiShot")
+    b2(self.aimedRow, "useAimedShot")
+    b2(self.volleyRow, "useVolley")
+    b2(self.raptorRow, "useRaptorStrike");  b2(self.raptorRow2, "useRaptorStrike")
+    b2(self.mongooseRow, "useMongooseBite"); b2(self.mongooseRow2, "useMongooseBite")
+    b2(self.wingRow, "useWingClip");        b2(self.wingRow2, "useWingClip")
+    b2(self.lacerateRow, "useLacerate")
+    b2(self.carveRow, "useCarve")
+    ui:BindCheck(self.trapRow, get("useImmolationTrap"));  ui:BindCheck(self.trapRow2, get("useImmolationTrap"))
+    ui:BindCheck(self.explosiveRow, av("useExplosiveTrap")); ui:BindCheck(self.explosiveRow2, av("useExplosiveTrap"))
 
-    -- "Aimed only on Lock and Load" follows the Aimed Shot checkbox.
-    self.aimedProcRow.cb:SetChecked(buf.aimedOnlyOnProc and true or false)
-    if buf.useAimedShot then
+    -- "Aimed only on Lock and Load" follows the Aimed Shot switch.
+    self.aimedProcRow.cb:SetChecked(get("aimedOnlyOnProc") and true or false)
+    if get("useAimedShot") then
         self.aimedProcRow.cb:Enable(); ui:Color(self.aimedProcRow.label, ui.COL.white)
     else
         self.aimedProcRow.cb:Disable(); ui:Color(self.aimedProcRow.label, ui.COL.grey)
     end
-    ui:BindCheck(self.aimedOpenerRow, buf.useAimedOpener)
+    ui:BindCheck(self.aimedOpenerRow, get("useAimedOpener"))
 
-    -- The mana swap needs Aspect of the Viper, which Turtle teaches at level 56.
-    -- The checkbox row carries the spell name, so the shared BindCheck above
-    -- already greys it with "(not learned)" and hides its slider. Only the
-    -- second row needs doing by hand: it has no checkbox of its own, so nothing
-    -- would otherwise tell it that the pair it belongs to is inactive.
-    local viperOK = self:KnowsSpell("Aspect of the Viper")
-    ui:Color(self.manaBackRow.label, viperOK and ui.COL.white or ui.COL.grey)
-
-    -- mana aspect sliders follow the swap checkbox: swap-to-Viper (low) and
-    -- swap-back-to-combat (high).
-    local map = buf.manaAspectPct or 30
-    self.manaAspRow.slider:SetValue(map)
-    if self.manaAspRow.slider.valText then self.manaAspRow.slider.valText:SetText(map .. "%") end
-    ui:SliderEnable(self.manaAspRow.slider, (viperOK and buf.useManaAspect) and true or false)
-    local mback = buf.manaAspectBackPct or (map + 15)
-    self.manaBackRow.slider:SetValue(mback)
-    if self.manaBackRow.slider.valText then self.manaBackRow.slider.valText:SetText(mback .. "%") end
-    ui:SliderEnable(self.manaBackRow.slider, (viperOK and buf.useManaAspect) and true or false)
-
-    -- Mend Pet threshold slider follows the Mend Pet checkbox.
-    local mhp = buf.mendPetHp or 50
+    -- spec abilities, pet, cooldowns
+    ui:BindCheck(self.kcRow, get("useKillCommand"))
+    ui:BindCheck(self.baitedRow, get("useBaitedShot"))
+    ui:BindCheck(self.bwRow, get("useBestialWrath"))
+    ui:BindCheck(self.petRow, get("petAttack"))
+    ui:BindCheck(self.petMeleeRow, get("petMeleeOnly"))
+    ui:BindCheck(self.tauntRow, get("petTaunt"))
+    ui:BindCheck(self.mendRow, get("useMendPet"))
+    if Aegis_SBR_Pet then self.petWinRow.cb:SetChecked(Aegis_SBR_Pet:Enabled()) end
+    local mhp = get("mendPetHp") or 50
     self.mendRow.slider:SetValue(mhp)
     if self.mendRow.slider.valText then self.mendRow.slider.valText:SetText(mhp .. "%") end
-    ui:SliderEnable(self.mendRow.slider, buf.useMendPet and true or false)
-
-    -- Active-spec focus: fade + lock the playstyle you are not in. Auto uses both,
-    -- so neither dims; Ranged dims only in pure Melee and Melee only in pure Ranged.
-    local m = buf.mode or "ranged"
-    self.rangedSection:SetDimmed(m == "melee")
-    self.meleeSection:SetDimmed(m == "ranged")
+    ui:SliderEnable(self.mendRow.slider, get("useMendPet") and true or false)
+    ui:BindCheck(self.cdRow, get("popCDs"))
+    ui:BindCheck(self.cdEliteRow, get("autoCDElite"))
+    ui:BindCheck(self.rfRow, get("useRapidFire") ~= false)
 end
 
 -- Open the shared window for this class.
