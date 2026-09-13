@@ -30,7 +30,7 @@ local M = Aegis_SBR:NewClassModule("HUNTER")
 M.uiTitle = "Hunter"
 -- Rotate runs under Aegis_SBR:Preview without casting (see Pick/Later).
 M.previewReady = true
-M.uiHeight = 938
+M.uiHeight = 1184
 M.meleeAutoAttack = false   -- managed here: Auto Shot (ranged) or Attack (melee)
 M.autoAcquireTarget = false -- a ranged class should not auto-pull random mobs; pick targets
 
@@ -106,13 +106,23 @@ local STING_TEX = {
     ["Scorpid Sting"] = "Ability_Hunter_CriticalShot",
     ["Viper Sting"]   = "Ability_Hunter_AimedShot",
     ["Hunter's Mark"] = "Ability_Hunter_SniperShot",
+    -- Read off a live target with /sbr debug: Interface\Icons\spell_lacerate_1C.
+    -- Without it the bleed was invisible on any client that cannot resolve
+    -- debuff names, and upkeep fell back to a blind 15s timer.
+    ["Lacerate"]      = "spell_lacerate",
 }
 
-M.modeAlias = {
-    ranged = "ranged", range = "ranged", ["r"] = "ranged",
-    melee = "melee", ["m"] = "melee",
-    auto = "auto", ["a"] = "auto", distance = "auto", dist = "auto",
+-- The three specs. There is no hybrid on this server: Beast Mastery and
+-- Marksmanship shoot, Survival fights in melee. The old ranged/melee/auto
+-- playstyle words are accepted where they map cleanly.
+M.specAlias = {
+    bm = "bm", beast = "bm", beastmastery = "bm", beastmaster = "bm",
+    mm = "mm", marks = "mm", marksman = "mm", marksmanship = "mm",
+    surv = "surv", survival = "surv", sv = "surv", melee = "surv",
 }
+M.SPEC_NAME = { bm = "Beast Mastery", mm = "Marksmanship", surv = "Survival" }
+-- Whether a spec fights in melee by default.
+M.SPEC_MELEE = { bm = false, mm = false, surv = true }
 
 M.stingAlias = {
     serpent = "Serpent Sting", ss = "Serpent Sting",
@@ -136,6 +146,7 @@ M.spellAlias = {
     carve = "useCarve",
     opener = "useAimedOpener", aimedopener = "useAimedOpener",
     immolation = "useImmolationTrap", trap = "useImmolationTrap",
+    explosive = "useExplosiveTrap",
     aspect = "useAspect",
     killcommand = "useKillCommand", kc = "useKillCommand",
     baited = "useBaitedShot",
@@ -149,11 +160,11 @@ M.templates = {
                  -- Aspect of the Hawk L10, Steady Shot L20). Auto mode picks
                  -- ranged vs melee by distance, which suits low-level pulls where
                  -- mobs close fast and you weave melee between shots.
-        mode = "auto",
+        spec = "bm", rangeSwitch = true,
         useHuntersMark = true, sting = "Serpent Sting",
         useSteadyShot = true, useArcaneShot = true, useMultiShot = false,
         useAimedShot = false, aimedOnlyOnProc = true,
-        aoeMode = false, useVolley = false, useImmolationTrap = false,
+        aoeMode = false, useVolley = false, useImmolationTrap = false, useExplosiveTrap = false,
         useRaptorStrike = true, useMongooseBite = true, useWingClip = false,
         useAspect = true, rangedAspect = "Aspect of the Hawk", meleeAspect = "Aspect of the Wolf",
         useManaAspect = false, manaAspectPct = 30,
@@ -162,11 +173,11 @@ M.templates = {
         popCDs = false, autoCDElite = false,
     },
     beastmastery = {
-        mode = "ranged",
+        spec = "bm", rangeSwitch = true,
         useHuntersMark = true, sting = "Serpent Sting",
         useSteadyShot = true, useArcaneShot = true, useMultiShot = true,
         useAimedShot = false, aimedOnlyOnProc = true,
-        aoeMode = false, useVolley = false, useImmolationTrap = false,
+        aoeMode = false, useVolley = false, useImmolationTrap = false, useExplosiveTrap = false,
         useRaptorStrike = true, useMongooseBite = true, useWingClip = false,
         useAspect = true, rangedAspect = "Aspect of the Hawk", meleeAspect = "Aspect of the Wolf",
         useManaAspect = true, manaAspectPct = 30,
@@ -175,11 +186,11 @@ M.templates = {
         popCDs = false, autoCDElite = true,
     },
     marksmanship = {
-        mode = "ranged",
+        spec = "mm", rangeSwitch = true,
         useHuntersMark = true, sting = "Serpent Sting",
         useSteadyShot = true, useArcaneShot = true, useMultiShot = true,
         useAimedShot = true, aimedOnlyOnProc = true,
-        aoeMode = false, useVolley = false, useImmolationTrap = false,
+        aoeMode = false, useVolley = false, useImmolationTrap = false, useExplosiveTrap = false,
         useRaptorStrike = false, useMongooseBite = false, useWingClip = false,
         useAspect = true, rangedAspect = "Aspect of the Hawk", meleeAspect = "Aspect of the Wolf",
         useManaAspect = true, manaAspectPct = 25,
@@ -187,12 +198,12 @@ M.templates = {
         useKillCommand = false, useBaitedShot = false,
         popCDs = false, autoCDElite = true,
     },
-    survival = {  -- hybrid: trap + melee, weaving shots
-        mode = "melee",
+    survival = {  -- melee: strikes, bleed, traps in combat
+        spec = "surv", rangeSwitch = true,
         useHuntersMark = true, sting = "Serpent Sting",
         useSteadyShot = true, useArcaneShot = true, useMultiShot = true,
         useAimedShot = false, aimedOnlyOnProc = true,
-        aoeMode = false, useVolley = false, useImmolationTrap = true,
+        aoeMode = false, useVolley = false, useImmolationTrap = true, useExplosiveTrap = true,
         useRaptorStrike = true, useMongooseBite = true, useWingClip = false, useLacerate = true, useCarve = true,
         useAspect = true, rangedAspect = "Aspect of the Hawk", meleeAspect = "Aspect of the Wolf",
         useManaAspect = true, manaAspectPct = 30,
@@ -201,11 +212,11 @@ M.templates = {
         popCDs = false, autoCDElite = true,
     },
     melee = {  -- BM / melee weave
-        mode = "melee",
+        spec = "bm", rangeSwitch = true,
         useHuntersMark = true, sting = "Serpent Sting",
         useSteadyShot = false, useArcaneShot = false, useMultiShot = false,
         useAimedShot = false, aimedOnlyOnProc = true,
-        aoeMode = false, useVolley = false, useImmolationTrap = false,
+        aoeMode = false, useVolley = false, useImmolationTrap = false, useExplosiveTrap = false,
         useRaptorStrike = true, useMongooseBite = true, useWingClip = false, useLacerate = true, useCarve = true,
         useAspect = true, rangedAspect = "Aspect of the Hawk", meleeAspect = "Aspect of the Wolf",
         useManaAspect = false, manaAspectPct = 30,
@@ -215,9 +226,12 @@ M.templates = {
     },
 }
 
+-- The talent that lets traps be placed in combat. Name as the client shows it.
+local TALENT_UNTAMED_TRAPPER = "Untamed Trapper"
+
 function M:NormalizeProfile(c)
     local b = {
-        mode = "ranged",
+        spec = "bm", rangeSwitch = true,
         -- Bestial Wrath has its own switch rather than riding on "Pop
         -- cooldowns" with Rapid Fire: one is a hunter cooldown and the other is
         -- a pet cooldown, and a hunter without a pet out wants the first and not
@@ -228,19 +242,38 @@ function M:NormalizeProfile(c)
         useHuntersMark = true, sting = "Serpent Sting",
         useSteadyShot = true, useArcaneShot = true, useMultiShot = false,
         useAimedShot = false, aimedOnlyOnProc = true,
-        aoeMode = false, useVolley = false, useImmolationTrap = false,
+        aoeMode = false, useVolley = false, useImmolationTrap = false, useExplosiveTrap = false,
         useRaptorStrike = true, useMongooseBite = true, useWingClip = false,
         useAspect = true, rangedAspect = "Aspect of the Hawk", meleeAspect = "Aspect of the Wolf",
         useManaAspect = false, manaAspectPct = 30,
         petAttack = true, useMendPet = true, mendPetHp = 50,
         petTaunt = false, useLacerate = false, useCarve = false, useAimedOpener = false,
+        useRapidFire = true,
         useKillCommand = false, useBaitedShot = false,
         popCDs = false, autoCDElite = false,
     }
     for k, v in pairs(b) do
         if c[k] == nil then c[k] = v end
     end
-    if c.mode ~= "ranged" and c.mode ~= "melee" and c.mode ~= "auto" then c.mode = "ranged" end
+    -- Migration from the playstyle field. Melee was Survival; ranged and auto
+    -- could be either shooting spec, so the talent tree decides, and the old
+    -- auto playstyle becomes the per-spec range switch.
+    if c.spec == nil and c.mode ~= nil then
+        if c.mode == "melee" then c.spec = "surv"
+        else c.spec = M:SpecFromTalents() end
+        if c.rangeSwitch == nil then c.rangeSwitch = (c.mode == "auto") end
+        c.mode = nil
+    end
+    if c.spec ~= "bm" and c.spec ~= "mm" and c.spec ~= "surv" then
+        c.spec = M:SpecFromTalents() or "bm"
+    end
+    if c.rangeSwitch == nil then c.rangeSwitch = true end
+    -- One sparse layer per spec, each with its own AoE set. A key present in
+    -- the active spec's layer wins over the base; absent, the base applies.
+    for _, sp in pairs({ "bm", "mm", "surv" }) do
+        if type(c[sp]) ~= "table" then c[sp] = {} end
+        if type(c[sp].aoe) ~= "table" then c[sp].aoe = {} end
+    end
     if type(c.sting) ~= "string" then c.sting = "Serpent Sting" end
     if type(c.rangedAspect) ~= "string" then c.rangedAspect = "Aspect of the Hawk" end
     if type(c.meleeAspect) ~= "string" then c.meleeAspect = "Aspect of the Wolf" end
@@ -249,7 +282,6 @@ function M:NormalizeProfile(c)
     -- fixed +MANA_ASPECT_HYST hysteresis, so default the back mark to that to
     -- preserve their existing behavior exactly.
     if c.manaAspectBackPct == nil then c.manaAspectBackPct = (c.manaAspectPct or 30) + MANA_ASPECT_HYST end
-    -- migrate the old ranged-only schema (useArcaneShot etc. carried over)
     return c
 end
 
@@ -476,11 +508,43 @@ function M:DebuffUpAny(name)
     return (remain and remain > 0) and true or false
 end
 
+-- May Kill Command be tried right now? Turtle's tooltip: it can only be used
+-- after the Hunter lands a critical strike on the target. Sent on cooldown
+-- alone it was refused on every press of a fight - hundreds of "You can't do
+-- that yet" lines in one log. So: armed by a crit of ours landing AFTER the
+-- last send, whether that send went through or was refused. A send consumes
+-- the crit; a refusal means there was none to consume. Either way the next
+-- attempt waits for the next crit, and a hunter's crits are not rare.
+function M:KillCommandArmed()
+    return (M.lastCritAt or 0) > (self.killCommandSentAt or 0)
+end
+
 -- Debuffs this client has actually been seen to read back off a target, by
 -- name. Same idea and same reason as stingSeen below: it is a property of the
 -- CLIENT (does SuperWoW resolve the name, does the icon fragment match, does
 -- ClassicAPI answer), not of any one mob, so it is kept for the session.
 M.debuffSeen = {}
+
+-- May Lacerate be tried right now? Yes once a crit of ours has landed since the
+-- last time the client refused it. The refusal is read the same way the throttle
+-- reads it: any refusal naming Lacerate after the send.
+function M:LacerateArmed()
+    local sent = self.lacerateSentAt
+    if sent and Aegis_SBR.SpellRefusedAnySince and Aegis_SBR:SpellRefusedAnySince("Lacerate", sent) then
+        self.lacerateDisarmedAt = sent
+        self.lacerateSentAt = nil
+    end
+    local dis = self.lacerateDisarmedAt
+    if not dis then return true end
+    return (M.lastCritAt or 0) > dis
+end
+
+-- Volley is aimed at the ground, and the placement - under the mouse, only
+-- while the mouse is on an enemy - is the core's (Aegis_SBR:CastAtMouse),
+-- shared with the other classes' ground spells.
+function M:CastVolley()
+    return self:CastAtMouse("Volley", "AoE, under the mouse")
+end
 
 function M:MaintainDebuff(name, interval)
     if not self:KnowsSpell(name) then return false end
@@ -876,11 +940,61 @@ end
 -- ============================================================
 -- Rotation
 -- ============================================================
+-- The spec with the most talent points, or nil before talents can be read.
+-- Tab order on the hunter tree is Beast Mastery, Marksmanship, Survival.
+function M:SpecFromTalents()
+    if not GetTalentTabInfo then return nil end
+    local best, bestPts, total = nil, -1, 0
+    local keys = { "bm", "mm", "surv" }
+    for i = 1, 3 do
+        local _, _, pts = GetTalentTabInfo(i)
+        pts = pts or 0
+        total = total + pts
+        if pts > bestPts then best, bestPts = keys[i], pts end
+    end
+    if total == 0 then return nil end
+    return best
+end
+
+-- The profile as THIS SPEC sees it, on this press.
+--
+-- Three tabs, three sparse layers: cfg.bm, cfg.mm, cfg.surv. A key present in
+-- the active spec's layer wins over the base; absent, the base applies. Each
+-- layer carries its own AoE set under .aoe, consulted first on an AoE press -
+-- so the AoE column on the Survival tab is Survival's alone. Lookup order on an
+-- AoE press: spec AoE, spec, base. On a single-target press: spec, base.
+--
+-- A proxy rather than a merged copy: the rotation's reads cost one lookup and
+-- its writes still land on the real profile.
+M.ownsAoeLayer = true
+
+function M:SpecConfig(cfg)
+    local spec = cfg.spec
+    local over = spec and cfg[spec]
+    if type(over) ~= "table" then return cfg end
+    local aoeSet = Aegis_SBR:AoeMode(cfg) and over.aoe or nil
+    if type(aoeSet) ~= "table" then aoeSet = nil end
+    return setmetatable({}, {
+        __index = function(_, k)
+            if aoeSet then
+                local v = aoeSet[k]
+                if v ~= nil then return v end
+            end
+            local v = over[k]
+            if v ~= nil then return v end
+            return cfg[k]
+        end,
+        __newindex = function(_, k, v) cfg[k] = v end,
+    })
+end
+
 function M:Rotate(cfg)
+    -- Everything below reads the profile through the active spec's own settings.
+    cfg = self:SpecConfig(cfg)
     local now      = GetTime()
     local cls      = UnitClassification("target")
     local isElite  = (cls == "worldboss" or cls == "elite" or cls == "rareelite")
-    local aoe      = cfg.aoeMode and true or false
+    local aoe      = Aegis_SBR:AoeMode(cfg)
     local inCombat = UnitAffectingCombat("player")
     local inMeleeNow = self:InMeleeRange()   -- actual range to target, independent of mode
     local targetHP   = self:TargetHPPct()
@@ -890,12 +1004,11 @@ function M:Rotate(cfg)
         or self:DebuffUpAny("Hunter's Mark")
     -- Effective range state. "auto" picks ranged vs melee by distance each press
     -- (so abilities only fire in the matching state); otherwise honor the choice.
-    local melee
-    if cfg.mode == "auto" then
-        melee = self:AutoMelee()
-    else
-        melee = (cfg.mode == "melee")
-    end
+    -- The spec sets the default range; the range switch lets distance override
+    -- it press by press, so a shooting spec that has been closed on uses its
+    -- melee set and a melee spec that is kept at range uses its shots.
+    local melee = M.SPEC_MELEE[cfg.spec or "bm"] or false
+    if cfg.rangeSwitch then melee = self:AutoMelee() end
 
     self:UpdateAspectState(cfg)
 
@@ -903,7 +1016,7 @@ function M:Rotate(cfg)
     local effectiveSting = self:ResolveSting(cfg)
 
     if self:Tracing() then
-        self:Trace("mode=" .. (cfg.mode or "ranged") .. (cfg.mode == "auto" and ("/" .. (melee and "melee" or "ranged")) or "")
+        self:Trace("spec=" .. (cfg.spec or "?") .. "/" .. (melee and "melee" or "ranged")
             .. " hp=" .. floor(targetHP)
             .. " sting=" .. (cfg.sting ~= "" and (cfg.sting
                 .. (effectiveSting ~= cfg.sting and ("->" .. effectiveSting) or "")
@@ -943,7 +1056,13 @@ function M:Rotate(cfg)
 
     local popBurst = cfg.popCDs or (cfg.autoCDElite and isElite)
     if popBurst and inCombat then
-        if self:KnowsSpell("Rapid Fire") and self:IsReady("Rapid Fire") then self:PickExtra("Rapid Fire") end
+        -- Rapid Fire speeds up ranged attacks and nothing else. In melee it is
+        -- a cooldown spent on nothing, so it stays for the ranged branch - and
+        -- is still ready when the hunter steps back to range.
+        if cfg.useRapidFire ~= false and not melee
+            and self:KnowsSpell("Rapid Fire") and self:IsReady("Rapid Fire") then
+            self:PickExtra("Rapid Fire")
+        end
         -- Bestial Wrath is a PET cooldown, not a hunter one, and it used to
         -- share this gate with Rapid Fire as though the two were the same kind
         -- of thing. Turtle's tooltip settles it: it grants the pet Scent of
@@ -962,9 +1081,12 @@ function M:Rotate(cfg)
             self:PickExtra("Bestial Wrath")
         end
     end
-    -- Kill Command is rotational for BM: fire on cooldown in combat (off GCD).
-    if cfg.useKillCommand and inCombat and self:KnowsSpell("Kill Command") and self:IsReady("Kill Command") then
+    -- Kill Command is rotational for BM: fire in combat (off GCD) once a crit
+    -- of ours has armed it - see KillCommandArmed.
+    if cfg.useKillCommand and inCombat and self:KnowsSpell("Kill Command") and self:IsReady("Kill Command")
+        and self:KillCommandArmed() then
         self:PickExtra("Kill Command")
+        self:Later(function() self.killCommandSentAt = GetTime() end)
     end
     -- Baited Shot reaction inside the short window after the pet crits.
     if cfg.useBaitedShot and self:KnowsSpell("Baited Shot")
@@ -1057,15 +1179,50 @@ function M:Rotate(cfg)
         if self:Queue("Aimed Shot", "Lock and Load proc") then return end
     end
 
-    -- 5d. Immolation Trap on cooldown (Survival, usable in combat on 1.18.1).
-    if cfg.useImmolationTrap and self:KnowsSpell("Immolation Trap") and self:IsReady("Immolation Trap") then
-        if self:Pick("Immolation Trap", "on cooldown") then return end
+    -- 5d. The trap, chosen by mode.
+    --
+    -- Two rotations, one per situation: against a single target the trap is
+    -- Immolation, against a pack it is Explosive - each on its own switch, and
+    -- the AoE toggle decides which one this press asks for. Not both: in AoE
+    -- the single-target trap is left alone, and the other way round.
+    --
+    -- IN COMBAT only with Untamed Trapper. Placing a trap while fighting is that
+    -- Survival talent's doing, not the client's - its tooltip says so in as many
+    -- words - and this used to assume the client allowed it for everyone. A
+    -- hunter without the talent had a trap offered on every cooldown and
+    -- refused on every one. Out of combat, on the pull, anyone may place one.
+    local trapOK = (not inCombat) or self:TalentRank(TALENT_UNTAMED_TRAPPER) > 0
+    if not trapOK then
+        -- nothing: the trap is simply not available right now
+    elseif aoe then
+        if cfg.useExplosiveTrap and self:KnowsSpell("Explosive Trap") and self:IsReady("Explosive Trap") then
+            if self:Pick("Explosive Trap", "AoE, on cooldown") then return end
+        end
+    else
+        if cfg.useImmolationTrap and self:KnowsSpell("Immolation Trap") and self:IsReady("Immolation Trap") then
+            if self:Pick("Immolation Trap", "on cooldown") then return end
+        end
     end
 
     -- ----------------------------------------------------------------
     -- 6a. Melee branch
     -- ----------------------------------------------------------------
     if melee then
+        -- Raptor Strike FIRST, and as an extra rather than the press's pick.
+        --
+        -- It is an on-next-swing attack: it queues on the white swing and spends
+        -- no global cooldown, so it can go out in the same press as Mongoose
+        -- Bite or Lacerate. Ranked as an ordinary rung below them - where it sat
+        -- - it was only reached on presses where neither of those fired, and a
+        -- swing that could have carried it went out plain.
+        --
+        -- This is the shape of the hand-written macro the module is measured
+        -- against: trap, then Raptor Strike whenever ready, then Mongoose Bite,
+        -- then Lacerate, with only the trap ending the press.
+        if cfg.useRaptorStrike and self:KnowsSpell("Raptor Strike") and self:IsReady("Raptor Strike")
+            and Aegis_SBR:CanAfford("Raptor Strike") then
+            self:PickExtra("Raptor Strike")
+        end
         -- Carve: the Survival melee cone AoE (up to 5 targets, shares its cooldown
         -- with Multi-Shot). Leads the melee branch when AoE is toggled on.
         if aoe and cfg.useCarve and self:KnowsSpell("Carve") and self:IsReady("Carve") then
@@ -1081,13 +1238,20 @@ function M:Rotate(cfg)
             and self:IsReady("Mongoose Bite") then
             if self:Pick("Mongoose Bite", "on cooldown") then return end
         end
-        -- Lacerate bleed upkeep (Turtle Survival): apply/refresh when it falls off.
-        if cfg.useLacerate and self:KnowsSpell("Lacerate") then
-            if self:MaintainDebuff("Lacerate", 15) then return end
-        end
-        -- Raptor Strike on cooldown (queues on the next melee swing).
-        if cfg.useRaptorStrike and self:KnowsSpell("Raptor Strike") and self:IsReady("Raptor Strike") then
-            if self:Pick("Raptor Strike", "on cooldown") then return end
+        -- Lacerate bleed upkeep. The tooltip on this client: an 8 second bleed on
+        -- a 10 second cooldown, usable only after critically striking the target.
+        --
+        -- The cooldown outlasts the bleed, so "when it falls off" and "when it is
+        -- ready" are the same moment, and upkeep by debuff is the right shape.
+        -- The crit requirement is the part that needs evidence: offered without
+        -- it, Lacerate took the press and was refused on every one until a crit
+        -- happened to land. So it is ARMED by a crit of ours and DISARMED by a
+        -- refusal - each refusal waits for the next crit, no guessed window.
+        if cfg.useLacerate and self:KnowsSpell("Lacerate") and self:LacerateArmed() then
+            if self:MaintainDebuff("Lacerate", 8) then
+                self:Later(function() self.lacerateSentAt = GetTime() end)
+                return
+            end
         end
         -- Carve as a single-target filler, BELOW every rotational attack, so it
         -- can only take a press nothing else wanted. Requested from play.
@@ -1114,14 +1278,18 @@ function M:Rotate(cfg)
     -- ----------------------------------------------------------------
     -- 6b. Ranged branch
     -- ----------------------------------------------------------------
-    -- AoE: Multi-Shot on cooldown (3+ targets), then Volley channel (4+ dense).
-    if aoe then
-        if cfg.useMultiShot and self:KnowsSpell("Multi-Shot") and self:IsReady("Multi-Shot") then
-            if self:Queue("Multi-Shot", "AoE") then return end
-        end
-        if cfg.useVolley and self:KnowsSpell("Volley") and self:IsReady("Volley") then
-            if self:Queue("Volley", "AoE") then return end
-        end
+    -- AoE lead: Multi-Shot ahead of the Steady weave, then Volley.
+    --
+    -- Volley is gated on its switch alone. The panel offers it in both columns,
+    -- and the column of the press is what cfg already reads - a second gate on
+    -- the AoE press here made the single column's switch do nothing, which is
+    -- how "Volley is on and never tried" came about. Multi-Shot keeps its AoE
+    -- lead; on a single press it has its own place after Steady Shot below.
+    if aoe and cfg.useMultiShot and self:KnowsSpell("Multi-Shot") and self:IsReady("Multi-Shot") then
+        if self:Queue("Multi-Shot", "AoE") then return end
+    end
+    if cfg.useVolley and self:KnowsSpell("Volley") and self:IsReady("Volley") then
+        if self:CastVolley() then return end
     end
 
     -- Steady Shot is the PRIMARY weave: tried first, but gated to the window right
@@ -1170,13 +1338,13 @@ end
 -- ============================================================
 -- Class specific slash subcommands, dispatched from the core
 -- ============================================================
-function M:CmdMode(alias)
+function M:CmdSpec(alias)
     local cfg = Aegis_SBR:GetActiveProfile()
     if not cfg then msgOut("no profile active.", 1, 0.5, 0.3); return end
-    local mode = self.modeAlias[string.lower(alias or "")]
-    if not mode then msgOut("usage: /sbr mode ranged|melee|auto", 1, 0.5, 0.3); return end
-    cfg.mode = mode
-    msgOut("playstyle = " .. mode .. ".")
+    local spec = self.specAlias[string.lower(alias or "")]
+    if not spec then msgOut("usage: /sbr spec bm|mm|survival", 1, 0.5, 0.3); return end
+    cfg.spec = spec
+    msgOut("spec = " .. (M.SPEC_NAME[spec] or spec) .. ".")
 end
 
 function M:CmdSting(alias)
@@ -1229,7 +1397,7 @@ function M:CmdSpell(alias, onoff)
 end
 
 function M:HandleCommand(cmd, t)
-    if cmd == "mode"  then self:CmdMode(t[2]); return true end
+    if cmd == "spec" or cmd == "mode" then self:CmdSpec(t[2]); return true end
     if cmd == "sting" then self:CmdSting(t[2]); return true end
     if cmd == "aoe"   then self:CmdAoe(); return true end
     if cmd == "cd"    then self:CmdCd(t[2]); return true end
@@ -1259,7 +1427,18 @@ hunterFrame:RegisterEvent("CHAT_MSG_SPELL_SELF_DAMAGE")
 -- - only a line naming one of our own tracked shots does anything at all. If the
 -- message never arrives here, registering it costs nothing.
 hunterFrame:RegisterEvent("CHAT_MSG_COMBAT_SELF_MISSES")
+-- Our own white crits. Lacerate may only be used after critically striking the
+-- target, and a white swing is one of the two ways to do that; the other, an
+-- ability crit, arrives on CHAT_MSG_SPELL_SELF_DAMAGE, already registered.
+hunterFrame:RegisterEvent("CHAT_MSG_COMBAT_SELF_HITS")
 hunterFrame:SetScript("OnEvent", function()
+    -- "You crit X for N." / "Your Raptor Strike crits X for N." - either one
+    -- arms Lacerate. Checked before anything else because both channels are
+    -- read further down for other reasons and return early there.
+    if (event == "CHAT_MSG_COMBAT_SELF_HITS" or event == "CHAT_MSG_SPELL_SELF_DAMAGE")
+        and arg1 and string.find(arg1, "crit") then
+        M.lastCritAt = GetTime()
+    end
     if event == "PLAYER_REGEN_ENABLED" then
         M.autoShotOn = false
         M.autoShotTarget = nil

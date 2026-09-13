@@ -52,6 +52,7 @@ function M:BuildBody(ui, parent)
     self.eclipseRow = L:Row{ key = "eclipse", label = "Eclipse reaction", onToggle = set("eclipse") }
     self.eclipseStickRow = L:Row{ key = "eclipseStick", label = "Stay on the empowered nuke",
         sub = "fish with it, not the default", onToggle = set("eclipseStick") }
+    self.hurricaneRow = L:Row{ key = "useHurricane", label = "Hurricane at the mouse (AoE)", spell = "Hurricane", onToggle = set("useHurricane") }
 
     self.restoSection = L:Header("Healing", "tree")
     self.htRow = L:Row{ label = "Heal below",
@@ -144,6 +145,7 @@ function M:BuildBody(ui, parent)
     ui:Tip(self.nukeDD, "Primary nuke", "Opens the fight and fishes for the first Eclipse proc.", "Casting Wraths empowers Starfire and vice versa, the rotation swaps automatically on the proc. With the setting below on, this is the opener rather than the constant filler.")
     ui:Tip(self.mfRow.cb, "Moonfire", "Kept up first. At low levels this plus the nuke IS the rotation.")
     ui:Tip(self.isRow.cb, "Insect Swarm", "Kept up right after Moonfire.")
+    ui:Tip(self.hurricaneRow.cb, "Hurricane at the mouse (AoE)", "On an AoE press (/sbr run aoe) or with the AoE toggle. Lands under the mouse: hold the mouse on the feet of the pack when pressing; with the mouse off any enemy the press skips it.")
     ui:Tip(self.eclipseRow.cb, "Eclipse reaction", "On a proc, cast the empowered opposite nuke. Casts are queued, so the swap lands the moment the window opens.", "If procs are not detected, run /sbr debug with the proc up and report the buff name.")
     ui:Tip(self.eclipseStickRow.cb, "Stay on the empowered nuke", "When a window closes, keep casting the nuke it empowered instead of returning to the primary.", "Each Eclipse has a 30s cooldown but only runs 15s. The nuke a window empowers is the one that procs the OTHER Eclipse, so staying on it fishes at the side that is off cooldown. Turning this off restores the old behaviour: always fish with the primary nuke.")
     ui:Tip(self.htRow.slider, "Heal threshold", "An ally below this health counts as hurt and pulls a heal. Everything in this section keys off it.")
@@ -208,6 +210,7 @@ function M:RefreshBody(ui, buf)
     ui:BindCheck(self.mfRow, buf.useMoonfire)
     ui:BindCheck(self.isRow, buf.useInsectSwarm)
     ui:BindCheck(self.eclipseRow, buf.eclipse)
+    ui:BindCheck(self.hurricaneRow, buf.useHurricane, "Hurricane")
     ui:BindCheck(self.eclipseStickRow, buf.eclipseStick ~= false)
     -- Healing + Downtime cards (concept rows). Toggles mirror the rotation's
     -- defaults (most on unless explicitly disabled); each slider carries its

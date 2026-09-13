@@ -4,7 +4,101 @@ All notable changes to **Aegis: Single Button Rotation** (formerly **AutoRota**)
 
 ---
 
-## v1.2.28 — a start that cannot stop
+## v1.2.28 — spec tabs, ground spells, and a start that cannot stop
+
+### ✨ Hunter — three spec tabs, a single/AoE column per switch, two macros
+
+The panel has **Beast Mastery**, **Marksmanship** and **Survival** tabs, one sparse settings
+layer each over a shared base; the active tab is the spec the rotation plays. The old
+`ranged / melee / auto` playstyle is migrated: melee becomes Survival, the other two take the
+spec with the most talent points, and the old *auto* becomes the per-spec **Switch attacks by
+distance** toggle. `/sbr spec bm|mm|survival` (`/sbr mode` still works as an alias).
+
+Every attack switch is a two-column row — **SINGLE** and **AOE** — and each column belongs to
+its tab. Two macros pick the column per press: `/sbr run single` and `/sbr run aoe`; a bare
+`/sbr` follows the profile's AoE toggle. The same press modes work for every class with an
+AoE mode (Warrior, Mage, Warlock, Druid) and a note above each such panel says so. Rows
+whose switch only means anything in one column carry a toggle in that column alone.
+
+Rotation changes that came with it, each from a tooltip rather than memory:
+
+- **Traps:** *Immolation Trap* on a single press, *Explosive Trap* on an AoE press. In combat
+  only with the *Untamed Trapper* talent — the client refuses them otherwise, and "1.18.1
+  allows traps in combat" was wrong.
+- **Lacerate** is only usable after a critical strike of yours: armed by a crit, disarmed by
+  the client's refusal, 8 second bleed on a 10 second cooldown.
+- **Kill Command** is only usable after the Hunter lands a critical strike. Sent on cooldown
+  alone it was refused on every press of a fight; it is now armed by a crit of yours (pet
+  crits do not count) and a send consumes it.
+- **Raptor Strike** leads the melee attacks off the global cooldown; **Rapid Fire** is a
+  ranged cooldown and no longer pops in melee; **Bestial Wrath** sits on the Beast Mastery
+  tab, where the talent is.
+- **Volley** never fired: it was gated on the AoE press on top of its own switch, so the
+  single column's toggle did nothing. See the ground spells below for how it lands now.
+
+### ✨ Ground-targeted spells, placed under the mouse
+
+*Volley*, *Blizzard* / *Flamestrike*, *Rain of Fire* and *Hurricane* are aimed at the ground,
+and a plain cast only opens the targeting reticle. Nothing on this client places such a spell
+at the target: a unit as the second argument leaves the reticle standing, the old world click
+after opening it is blocked by Turtle's client, and SuperWoW 2.0's `"CLICK"` form is not passed
+through by Nampower's own hook of the same function (SuperWoW issue 107).
+
+What works is Nampower's quickcast (`NP_QuickcastTargetingSpells`), raised for the one cast
+and put back, so the player's own setting is kept. The spell lands **under the mouse**, and
+the rotation only sends it while the mouse rests on an attackable enemy — aim at the feet of
+the pack. A reticle left standing (the mouse off any ground the spell can reach) is read
+before and after sending, put away, and the spell waits eight seconds; a second cast of the
+same spell would otherwise cancel the reticle and the cursor flickered press after press.
+Without Nampower there is one chat line and ground spells stay manual until the next reload.
+
+One core routine (`Aegis_SBR:CastAtMouse`), four uses: Hunter *Volley* (single or AoE column),
+Mage **Blizzard / Flamestrike at the mouse** (off by default, in AoE mode after Frost Nova;
+Flamestrike for fire), Warlock **Rain of Fire at the mouse** (on by default, AoE press only,
+below the survival steps, sent through the send and channel guards, not while moving) and
+Druid **Hurricane at the mouse (AoE)** (off by default, ahead of the nukes; the druid module
+gained a channel guard for it, it had none).
+
+### 🐛 Druid: the Automatic cat style never finished
+
+A normal mob that is not worth bleeding goes to the Shred branch, whose only finisher was
+*Ferocious Bite* — not learned before 32, so the rotation built five points with Claw and
+stood still. The finisher is now chosen by what is learned: Rip when bleeding, else Ferocious
+Bite, else Rip; with no finisher castable the builder goes on, and only "learned but not
+affordable yet" still waits.
+
+### 🔧 Warlock: sends that die, and the tail of a cast
+
+- A spell queued behind a bare global cooldown never fires on some Nampower setups. A queued
+  send now has a due moment (the end of what it was queued behind); untaken shortly past it,
+  it is dropped, its DoT stamps cleared, and the next send goes direct.
+- A direct cast a few hundredths of a second after a cast lands is dropped silently by the
+  client. Direct is now only for a client idle for a margin, ready, and not casting; everything
+  else queues.
+- A cast-time DoT's "sent, not yet confirmed" wait covers its cast time plus a landing margin,
+  not the fixed ceiling, so *Corruption* with a cast time is not re-sent mid-cast.
+- The channel guard releases when the target changes or dies, not only when moving; the
+  target is compared by id and by name, since the id read flickers between the two.
+- A wand that is already repeating is a plan the preview can show, not a silent return.
+
+### 🔧 Paladin healer: the seal is a choice
+
+*Seal and judgement* replaces *Mana management*: a dropdown picks the seal the healer keeps
+up and judges (default *Seal of Wisdom*), and the seal is only refreshed **while auto-attack
+is running** — it pays back through hits and nothing else. The tank and DPS modes are
+untouched.
+
+### 🔧 Movement detection can be switched off
+
+`/sbr move on|off`, and a checkbox on the minimap panel. Off, nothing waits for standing still
+and the client decides; for players whose client does not report movement cleanly.
+
+### 🔧 Smaller
+
+- `/sbr deps` shows the SuperWoW version.
+- Warrior: *Sweeping Strikes* needs Battle Stance; the AoE press works for the warrior too.
+- Panel: a note before the first section is no longer laid under the first card; two-column
+  rows carry their tooltip on both toggles.
 
 ### 🔧 Auto Shot, the wand and the melee swing no longer switch off by accident (ClassicAPI)
 

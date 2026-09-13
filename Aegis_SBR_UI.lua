@@ -330,6 +330,13 @@ Aegis_SBR_UI.COL = COL
 function Aegis_SBR_UI:FS(parent, font, text) return FS(parent, font, text) end
 function Aegis_SBR_UI:Color(fs, c) color(fs, c) end
 function Aegis_SBR_UI:Tip(frame, title, l1, l2) Tip(frame, title, l1, l2) end
+-- The same tooltip on every toggle a row carries: a two-column row (Row2) has
+-- one per column, and the player reads whichever they are about to click.
+function Aegis_SBR_UI:TipRow(item, title, l1, l2)
+    if not item then return end
+    Tip(item.cb, title, l1, l2)
+    if item.cb2 then Tip(item.cb2, title, l1, l2) end
+end
 function Aegis_SBR_UI:Divider(parent, y) divider(parent, y) end
 
 
@@ -474,6 +481,16 @@ function Aegis_SBR_UI:BindCheck(item, on, spellName)
         item.label:SetText(item.baseText .. " (not learned)"); color(item.label, COL.grey)
         sliderShown(false)
     end
+end
+
+-- Bind a two-column row (Layout:Row2): the single-target toggle, the AoE
+-- toggle, and one label for both. The learned/unlearned colouring follows
+-- BindCheck, with "on" meaning either column is on.
+function Aegis_SBR_UI:BindCheck2(item, onSingle, onAoe, spellName)
+    self:BindCheck(item, (onSingle or onAoe), spellName)
+    item.cb:SetChecked(onSingle and true or false)
+    item.cb2:SetChecked(onAoe and true or false)
+    item.cb2:Enable()
 end
 
 -- Enable or grey out a slider in one call (mouse + alpha), so callers do not
@@ -790,6 +807,36 @@ end
 
 function Aegis_SBR_Layout:Gap(n) self.y = self.y - (n or 8) end
 
+-- A short note above the body: small, muted, but with a bright lead word so
+-- it is not scanned past. `lead` is the bright part, `text` the rest; both on
+-- one line, wrapped inside the body width if they need it.
+function Aegis_SBR_Layout:Note(lead, text)
+    local P = self.host or self.p
+    local fs = FS(P, "GameFontNormalSmall", "")
+    SetFontSafe(fs, false, 11)
+    -- Before the first section the note sits on the body itself, where the
+    -- stacked section cards begin at TOP_PAD: it goes below that line, and
+    -- Reflow starts the cards below the note (self.pre) - without which the
+    -- first card was laid straight over it.
+    local y = self.y - 6
+    if not self.cur then y = y - LAY.TOP_PAD end
+    fs:SetPoint("TOPLEFT", P, "TOPLEFT", LAY.L_PAD + 2, y)
+    fs:SetWidth(322 - LAY.L_PAD - 14); fs:SetJustifyH("LEFT")
+    fs:SetTextColor(PAL.mute[1], PAL.mute[2], PAL.mute[3])
+    fs:SetText("|cffe8d8a0" .. (lead or "") .. "|r " .. (text or ""))
+    self:_rec(fs, false)
+    -- two lines' worth, whether it wraps or not, so the block below never
+    -- collides with a wrapped note
+    self.y = self.y - 34
+    if not self.cur then self.pre = -self.y end
+end
+
+-- The note every class with an AoE mode carries: the two macros that select
+-- the mode press by press.
+function Aegis_SBR_Layout:MacroNote()
+    self:Note("Two macros:", "/sbr run single and /sbr run aoe choose the column each press reads. A bare /sbr follows the profile's AoE toggle.")
+end
+
 -- Concept-style row: [switch] Label sub ............ [slider--] [value]
 -- One row per setting. o = { key, label, sub, spell, onToggle, slider = {
 -- key, min, max, step, suffix, onChange, width } }. Omit onToggle for a plain
@@ -797,6 +844,67 @@ function Aegis_SBR_Layout:Gap(n) self.y = self.y - (n or 8) end
 -- inside the label string as an inline colour code, so BindCheck's
 -- "(not learned)" suffixing keeps working. Returns { cb, label, baseText,
 -- spellName, slider, value } - BindCheck-compatible.
+-- Column titles for a run of Row2 rows below: two short words, right-aligned
+-- over the two toggle columns.
+local ROW2_COL_A = -58   -- TOPRIGHT offset of the single-target toggle
+local ROW2_COL_B = -10   -- TOPRIGHT offset of the AoE toggle
+
+function Aegis_SBR_Layout:ColumnHeads(a, b)
+    self:_sep()
+    local P = self.host or self.p
+    local fa = FS(P, "GameFontNormalSmall", string.upper(a or ""))
+    SetFontSafe(fa, true, 10)
+    fa:SetPoint("TOPRIGHT", P, "TOPRIGHT", ROW2_COL_A + 4, self.y - 4)
+    fa:SetWidth(44); fa:SetHeight(12); fa:SetJustifyH("CENTER")
+    fa:SetTextColor(PAL.ink[1], PAL.ink[2], PAL.ink[3])
+    self:_rec(fa, false)
+    local fb = FS(P, "GameFontNormalSmall", string.upper(b or ""))
+    SetFontSafe(fb, true, 10)
+    fb:SetPoint("TOPRIGHT", P, "TOPRIGHT", ROW2_COL_B + 4, self.y - 4)
+    fb:SetWidth(44); fb:SetHeight(12); fb:SetJustifyH("CENTER")
+    fb:SetTextColor(PAL.ink[1], PAL.ink[2], PAL.ink[3])
+    self:_rec(fb, false)
+    self.y = self.y - 16
+end
+
+-- A row with the label on the left and TWO toggles in fixed columns on the
+-- right - the table shape for a switch that exists once per mode. o.onSingle
+-- and o.onAoe are the two click handlers; o.key must be unique, the two
+-- checkbuttons are named from it.
+-- Either column may be left out: a switch that only means anything in one
+-- mode gets its toggle in that column and nothing in the other. item.cb is
+-- then whichever toggle exists, so BindCheck works on it unchanged.
+function Aegis_SBR_Layout:Row2(o)
+    self:_sep()
+    local P = self.host or self.p
+    local hl = self:_hl(LAY.VROW_H)
+    local item = { spellName = o.spell, baseText = o.label or "" }
+    local a, b
+    if o.onSingle then
+        a = self.ui:CreateCheck(o.key .. "_s", P, "", o.spell, o.onSingle)
+        a.cb:SetPoint("TOPRIGHT", P, "TOPRIGHT", ROW2_COL_A, self.y - 6)
+        wireHover(a.cb, hl)
+        self:_rec(a.cb, true)
+    end
+    if o.onAoe then
+        b = self.ui:CreateCheck(o.key .. "_a", P, "", o.spell, o.onAoe)
+        b.cb:SetPoint("TOPRIGHT", P, "TOPRIGHT", ROW2_COL_B, self.y - 6)
+        wireHover(b.cb, hl)
+        self:_rec(b.cb, true)
+    end
+    local lab = FS(P, "GameFontNormalSmall", item.baseText)
+    SetFontSafe(lab, false, 12)
+    lab:SetPoint("TOPLEFT", P, "TOPLEFT", 12, self.y - 9)
+    lab:SetTextColor(PAL.ink[1], PAL.ink[2], PAL.ink[3])
+    lab:SetWidth(322 - 12 - 108); lab:SetHeight(12); lab:SetJustifyH("LEFT")
+    self:_rec(lab, false)
+    item.label = lab
+    item.cb = (a and a.cb) or (b and b.cb)
+    item.cb2 = (a and b) and b.cb or nil
+    self.y = self.y - LAY.VROW_H
+    return item
+end
+
 function Aegis_SBR_Layout:Row(o)
     self:_sep()
     local P = self.host or self.p
@@ -993,7 +1101,7 @@ function Aegis_SBR_Layout:Reflow()
     local st = MOD() and MOD().specTabs
     local cur
     if st and self.ui.buf then cur = self.ui:CurrentSpecKey() end
-    local y = -LAY.TOP_PAD
+    local y = -LAY.TOP_PAD - (self.pre or 0)
     local shown = 0
     for i = 1, table.getn(self.sections) do
         local sec = self.sections[i]

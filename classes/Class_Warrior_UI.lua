@@ -33,6 +33,7 @@ local SPELL_OF = {
 function M:BuildBody(ui, parent)
     local L = ui:NewLayout(parent)
     self.cb = {}
+    L:MacroNote()
 
     -- helpers: place via the layout cursor and register into self.cb for RefreshBody.
     local function set(key) return function(v) if ui.buf then ui.buf[key] = v; ui:Refresh() end end end

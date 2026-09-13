@@ -29,7 +29,7 @@ local M = Aegis_SBR:NewClassModule("WARRIOR")
 M.uiTitle = "Warrior"
 -- Rotate runs under Aegis_SBR:Preview without casting (see Pick/Later).
 M.previewReady = true
-M.uiHeight = 730
+M.uiHeight = 764
 
 -- Chat output is shared in the core; this shim keeps call sites unchanged.
 local function msgOut(text, r, g, b) Aegis_SBR:Msg(text, r, g, b) end
@@ -143,6 +143,10 @@ local STANCE_REQ = {
     ["Recklessness"]  = { "Berserker Stance" },
     ["Berserker Rage"]= { "Berserker Stance" },
     ["Shield Block"]  = { "Defensive Stance" },
+    -- Was missing, and a missing entry reads as "any stance": in Defensive with
+    -- AoE mode on, Sweeping Strikes was offered on every press and refused on
+    -- every press. Battle Stance only, per the client tooltip.
+    ["Sweeping Strikes"] = { "Battle Stance" },
     -- Bloodthirst, Shield Slam, Slam, Sunder Armor, Heroic Strike, Cleave,
     -- Death Wish, Bloodrage: usable in any stance (Shield Slam needs a shield).
 }
@@ -608,7 +612,7 @@ function M:Rotate(cfg)
     local hp     = self:TargetHPPct()
     local cls    = UnitClassification("target")
     local isElite = (cls == "worldboss" or cls == "elite" or cls == "rareelite")
-    local aoe    = cfg.aoeMode and true or false
+    local aoe    = Aegis_SBR:AoeMode(cfg)
     local inCombat = UnitAffectingCombat("player")
 
     local inExecute = cfg.useExecute and hp <= 20 and self:KnowsSpell("Execute")

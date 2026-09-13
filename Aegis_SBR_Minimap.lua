@@ -325,6 +325,12 @@ local function buildPanel()
         if Aegis_SBR_Range then Aegis_SBR_Range:SetShown(on) end
     end)
 
+    -- Movement detection. Off, channels and cast-time spells are attempted
+    -- whenever the rotation reaches them, and the client decides.
+    p.moveCheck = makeCheck(-256, "Movement detection", function(on)
+        if AegisDB then AegisDB.moveDetect = on end
+    end)
+
     local cfg = CreateFrame("Button", nil, p, "UIPanelButtonTemplate")
     cfg:SetWidth(208); cfg:SetHeight(22)
     cfg:SetPoint("BOTTOM", 0, 12)
@@ -351,6 +357,9 @@ function AM:RefreshPanel()
     end
     if p.rangeCheck and Aegis_SBR_Range then
         p.rangeCheck:SetChecked(Aegis_SBR_Range:Enabled())
+    end
+    if p.moveCheck and Aegis_SBR and Aegis_SBR.MoveDetectEnabled then
+        p.moveCheck:SetChecked(Aegis_SBR:MoveDetectEnabled())
     end
     if p.buffMonCheck and Aegis_SBR_BuffUp then
         p.buffMonCheck:SetChecked(Aegis_SBR_BuffUp:BuffMonitorEnabled())

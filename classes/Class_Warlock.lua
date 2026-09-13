@@ -47,7 +47,7 @@ local M = Aegis_SBR:NewClassModule("WARLOCK")
 M.uiTitle = "Warlock"
 -- Rotate runs under Aegis_SBR:Preview without casting (see Pick/Later).
 M.previewReady = true
-M.uiHeight = 772
+M.uiHeight = 862
 M.meleeAutoAttack = false   -- caster, no white melee swing
 
 -- Talent that turns on the free instant Shadow Bolt proc (Shadow Trance).
@@ -136,6 +136,10 @@ M.stConsumed = false
 M.stConsumedAt = 0
 local GCD = 1.5
 
+-- Seconds past busyUntil before a direct cast is trusted over the queue. Covers
+-- the round trip on the cast that just ended.
+local DIRECT_MARGIN = 0.3
+
 -- The global cooldown is spent when a cast STARTS, so an instant that has gone
 -- out, and a cast-time spell that was cut off halfway, both leave the same floor
 -- behind: the client is busy until a GCD after the send, whatever else happened
@@ -187,6 +191,9 @@ wlChannelFrame:SetScript("OnEvent", function()
         M.sentSeen = true
         M.channeling = true
         M.chanStart = GetTime()
+        -- Whom it is on, so the guard can tell when that mob is gone.
+        M.chanTarget = Aegis_SBR:TargetId()
+        M.chanTargetName = UnitName("target")
         -- Which channel this is. The event does not say, and the last spell SENT
         -- is the wrong answer whenever the queue held the channel behind
         -- something else. Measured at 34 of 598 guard presses in one session: a
@@ -568,6 +575,8 @@ function M:NormalizeProfile(c)
     if c.dhDotRemain == nil then c.dhDotRemain = 10 end
     if c.chanDotRemain == nil then c.chanDotRemain = 5 end
     if c.nightfall == nil then c.nightfall = false end
+    -- On by default: an AoE press has nothing else to do in this module.
+    if c.useRainOfFire == nil then c.useRainOfFire = true end
     if c.drainLifeSustain == nil then c.drainLifeSustain = false end
     if c.drainLifeHp == nil then c.drainLifeHp = 35 end
     if c.healthFunnel == nil then c.healthFunnel = false end
@@ -663,6 +672,7 @@ M.CHANNELED = {
     ["Drain Soul"]    = true,
     ["Dark Harvest"]  = true,
     ["Health Funnel"] = true,
+    ["Rain of Fire"]  = true,
 }
 
 -- Cast time of what this module sends that is neither a DoT nor a channel.
@@ -742,12 +752,42 @@ function M:Queue(name, reason, busy)
     -- Overestimating busyUntil only queues where a direct cast would also have
     -- worked, which is the behaviour this replaces. Underestimating casts into a
     -- running cast and loses the press, so the estimate rounds up.
-    local direct = self:Wanding() or not QueueSpellByName
-        or GetTime() >= (self.busyUntil or 0)
+    --
+    -- The wand shortcut casts directly so the spell does not sit behind the
+    -- current shot - but a direct cast into a RUNNING global cooldown is refused
+    -- by the client, and a cooldown refusal is one the ledgers deliberately
+    -- ignore, so it vanished without a trace. Measured on a wand-filler warlock:
+    -- Curse of Agony sent, the next press 0.3s later cast Corruption straight
+    -- into that cooldown, nothing happened, and the DoT was only re-sent once
+    -- the confirmation wait ran out two seconds later. Every DoT after an
+    -- instant cost two extra seconds - the reported constant hangs.
+    --
+    -- While the cooldown runs, nothing goes out before it ends whichever way it
+    -- is sent, so queueing loses nothing there. The shortcut is kept for the
+    -- case it was written for: a spell that is ready now.
+    --
+    -- And a margin after busyUntil. busyUntil is the cast time exactly, and a
+    -- direct cast a few hundredths of a second after it lands in the tail of the
+    -- cast the server is still finishing - Nampower drops that silently, no
+    -- refusal, no cooldown. Measured: Immolate lands, the next press casts
+    -- Curse of Agony directly 40ms later, and nothing happens at all. The queue
+    -- is the right tool for that moment; direct is only for a client that has
+    -- been idle for long enough to be sure of it.
+    local idleFor = GetTime() - (self.busyUntil or 0)
+    local direct = not QueueSpellByName
+        or ((self:Wanding() or idleFor >= DIRECT_MARGIN or M.forceDirect)
+            and Aegis_SBR:IsReady(name) and not M.casting)
+    M.forceDirect = nil
     if direct then
         CastSpellByName(name)
+        M.sentDueAt = nil
     else
         QueueSpellByName(name)
+        -- When the queue should fire this: the end of whatever is in flight now.
+        -- Read BEFORE busyUntil is restamped below, and kept for the send guard,
+        -- which treats a queued send that is still untaken past this point as
+        -- dead rather than waiting out its full window.
+        M.sentDueAt = self.busyUntil or GetTime()
     end
     self.busyUntil = GetTime() + self:BusyFor(name, busy)
     return true
@@ -946,6 +986,7 @@ end
 local CHANNEL_BASE = {
     ["Drain Life"]    = 5,
     ["Health Funnel"] = 10,
+    ["Rain of Fire"]  = 8,
 }
 local CHANNEL_TALENTED = {
     ["Drain Life"]   = true,
@@ -975,6 +1016,11 @@ local CHANNEL_GRACE = 0.25
 --
 -- Decaying rather than a plain maximum, so one bad moment does not widen the
 -- ceiling for the rest of the session.
+-- Seconds past a DoT's own cast time before an unconfirmed cast may be
+-- re-sent. Covers the round trip after the cast completes; the cast time itself
+-- is added separately, per spell and with talents.
+local CAST_LAND_MARGIN = 1.0
+
 local CONFIRM_MIN = 0.6
 local CONFIRM_MAX = 2.0
 local CONFIRM_FACTOR = 3
@@ -1501,9 +1547,26 @@ function M:ApplyDot(spellName, texFrag, interval)
     -- server it settles near two thirds of a second; under the lag that produced
     -- those three second holes it widens by itself rather than double-casting a
     -- DoT that was merely slow to be acknowledged.
+    --
+    -- The ceiling is a LATENCY allowance, and a spell with a cast time needs the
+    -- cast time on top of it. Measured on a warlock without Improved Corruption:
+    -- Corruption is a 2.0s cast, the ceiling is 2.0s, so the ceiling ran out at
+    -- the moment the cast was about to land, the DoT was re-sent, and the
+    -- re-send RESTARTED the cast - throwing away the one that was a few tenths
+    -- of a second from completing. Every Corruption cost four seconds instead
+    -- of two, twice per DoT cycle: the reported constant three-second hangs.
+    -- Immolate escaped by a tenth of a second, which is why only one of the two
+    -- was obvious.
+    --
+    -- Two things end the wait now, and the second is evidence rather than a
+    -- number: a cast that has announced its start and not its end is running,
+    -- whatever the clock says, and re-sending into it can only destroy it.
     local pend = self.dotPending[spellName]
-    if pend and pend.id == id and (now - pend.t) <= self:ConfirmCeiling() then
-        return "wait"
+    if pend and pend.id == id then
+        local allow = self:ConfirmCeiling()
+        local ct = self:DotCastTime(spellName)
+        if ct > 0 and (ct + CAST_LAND_MARGIN) > allow then allow = ct + CAST_LAND_MARGIN end
+        if (now - pend.t) <= allow or M.casting then return "wait" end
     end
     self:QueueDot(spellName, id)
     return "cast"
@@ -1577,6 +1640,21 @@ end
 --
 -- A refusal here that is still followed by a wand shot means the shot did not
 -- come from this addon.
+-- The wand is already auto-repeating, so the press has nothing to add. True
+-- means "return now", exactly as the bare Wanding() test it replaces - but the
+-- preview is told what is happening. A silent return left the window reading
+-- "hold / nothing due right now" while the wand fired every second, which a
+-- player reads as the rotation having stopped: reported as Immolate showing for
+-- a moment, then the wand, then nothing.
+function M:WandRepeating()
+    if not self:Wanding() then return false end
+    if Aegis_SBR.deciding then
+        local p = Aegis_SBR.decidePlan
+        p.spell = "Shoot"; p.reason = "wand repeating"
+    end
+    return true
+end
+
 -- `stop` is set by the two callers that want the wand OFF (a DoT is about to
 -- fall off). Those go out as the plain toggle cast, which is the only way to
 -- stop an auto-repeat. Every other caller is a START and goes through
@@ -1687,12 +1765,67 @@ function M:Rotate(cfg)
         answered = true
         self:Later(function() M.sentSeen = true end)
     end
-    if M.sentAt and not answered and (GetTime() - M.sentAt) < SEND_GRACE then
+    --
+    -- A QUEUED send has a known moment at which it is due: the end of the cast
+    -- or cooldown it was queued behind. If the client has not taken it shortly
+    -- after that moment, it is not going to - and waiting out the full window
+    -- on top is dead time. Measured on a client whose Nampower never fires a
+    -- spell queued behind a bare global cooldown: every queued send died and
+    -- every direct one landed, so each DoT cost the 1.5s window plus its own
+    -- cast. The window is now the due moment plus a margin for queued sends,
+    -- and the full 1.5s only for direct ones, where there is no due moment.
+    local limit = SEND_GRACE
+    if M.sentAt and M.sentDueAt then
+        local q = (M.sentDueAt + DIRECT_MARGIN) - M.sentAt
+        if q < DIRECT_MARGIN then q = DIRECT_MARGIN end
+        if q < limit then limit = q end
+        -- And no margin at all where the client answers the question itself.
+        -- Past the due moment, a spell that reads READY has not been fired by
+        -- the queue: had it gone out, its own global cooldown would be running
+        -- and IsReady would say no. That is evidence, and it beats waiting a
+        -- fixed 0.3s for it - the difference between the rotation and a player
+        -- pressing the key by hand at cooldown end, which is what this was
+        -- measured against.
+        if not answered and GetTime() >= M.sentDueAt and not M.casting
+            and M.sentSpell and Aegis_SBR:IsReady(M.sentSpell) then
+            limit = 0
+        end
+    end
+    if M.sentAt and not answered and (GetTime() - M.sentAt) < limit then
         if self:Tracing() then
             self:Trace(string.format("STALL %s sent, waiting for the client",
                 tostring(M.sentSpell)))
         end
         return
+    end
+    -- The window ran out and the client never took the spell: no cast started,
+    -- no global cooldown began, no refusal came. The send is dead, and the
+    -- stamps QueueDot put down for it - "sent, assume it lands" - are stamps for
+    -- something that did not happen. Left in place they held the DoT for the
+    -- full three second interval on top of the 1.5s already spent here.
+    --
+    -- Measured, current code, every mob: Curse of Agony sent, five presses of
+    -- this guard, then "unconfirmed" up to 3.2s, then a re-send that landed at
+    -- once. Mana unchanged the whole time. Same for Corruption. The first send
+    -- went nowhere and the addon spent 3.2 seconds believing in it.
+    if M.sentAt and not answered and M.sentSpell then
+        local sp = M.sentSpell
+        if self:Tracing() then self:Trace(sp .. " sent, never taken - dropping it") end
+        self:Later(function()
+            M.sentAt = nil
+            self.dotThrottle[sp] = nil
+            self.dotPending[sp] = nil
+            -- The dead send stamped busyUntil as if it had gone out. It did
+            -- not, so the client has been idle since the send it was queued
+            -- behind ended - which is what lets the re-send go out direct.
+            if M.sentDueAt then self.busyUntil = M.sentDueAt end
+            M.sentDueAt = nil
+            -- The re-send goes DIRECT. Queued again it would die again on a
+            -- client whose queue does not fire behind a cooldown, and be
+            -- declared dead again a press later - a loop that only ends once
+            -- the idle margin happens to run out.
+            M.forceDirect = true
+        end)
     end
 
     if self.channeling and self.chanStart then
@@ -1705,7 +1838,22 @@ function M:Rotate(cfg)
         -- Checked here rather than waited for, because the client announces a
         -- broken channel through an event this one does not reliably send.
         local why = nil
-        if Aegis_SBR:Moving() then
+        -- The mob the channel was on is dead or no longer the target. A channel
+        -- cannot outlive its target, and the stop event that would say so is the
+        -- one this client does not reliably send - so without this the guard
+        -- held the NEXT mob for the rest of the old channel's length. Drain Soul
+        -- as the finisher makes that the normal end of every fight: reported as
+        -- a hang on the third mob before any DoT went out.
+        --
+        -- Both id forms are kept, as in the Dark Harvest guard: TargetId flips
+        -- between GUID and name from press to press.
+        local sameTarget = self.chanTarget and (Aegis_SBR:TargetId() == self.chanTarget
+            or (self.chanTargetName and UnitName("target") == self.chanTargetName))
+        if self.chanTarget and not sameTarget then
+            why = "target changed"
+        elseif UnitIsDead("target") then
+            why = "target dead"
+        elseif Aegis_SBR:Moving() then
             why = "broken by movement"
         elseif held < limit then
             if self:Tracing() then
@@ -1860,6 +2008,18 @@ function M:Rotate(cfg)
         if self:Queue("Health Funnel", "pet is hurt") then return end
     end
 
+    -- P2b Rain of Fire, on an AoE press only (/sbr run aoe, or the profile's
+    -- AoE toggle). Placed under the mouse by the core (Aegis_SBR:CastAtMouse:
+    -- only while the mouse rests on an enemy), sent through Queue so the send
+    -- and channel guards above see it like any other channel. Below the two
+    -- survival steps, above everything single-target.
+    if cfg.useRainOfFire and Aegis_SBR:AoeMode(cfg) and self:KnowsSpell("Rain of Fire")
+        and self:IsReady("Rain of Fire") and not M.casting then
+        if self:CastAtMouse("Rain of Fire", "AoE, under the mouse", function()
+            return self:Queue("Rain of Fire", "AoE, under the mouse")
+        end) then return end
+    end
+
     -- P3 Shadowburn execute: instant finish under the execute threshold (costs
     -- a Soul Shard). On a cooldown, so it is gated by IsReady. Also gated on
     -- actually holding a shard: without one the cast fails in-game while
@@ -1893,7 +2053,7 @@ function M:Rotate(cfg)
             return
         end
         if self:HasWand() then
-            if self:Wanding() then return end
+            if self:WandRepeating() then return end
             if self:Tracing() then
                 self:Trace(string.format("wandstart ready=%s mana=%.0f hp=%.0f",
                     tostring(self:IsReady("Shoot")), self:ManaPct(), hp))
@@ -2145,7 +2305,7 @@ function M:Rotate(cfg)
                 if self:Wanding() then self:Shoot("stopping the wand for a DoT", true) end -- toggles the repeat off
                 return
             end
-            if self:Wanding() then return end
+            if self:WandRepeating() then return end
             self:Shoot(gap == "Shoot" and "wanding, gap filler" or "wanding, gap unavailable")
         elseif self:KnowsSpell("Shadow Bolt") and self:HardCastBoltOK(cfg) then
             self:Queue("Shadow Bolt", "filler nuke")
@@ -2164,7 +2324,7 @@ function M:Rotate(cfg)
             return
         end
         -- spammable wand, only start it if it is not already auto repeating
-        if self:Wanding() then return end
+        if self:WandRepeating() then return end
         self:Shoot("wanding")
     elseif filler == "Drain Soul" then
         -- Same channel caution as the Dark Harvest gap filler, minus the
@@ -2196,7 +2356,7 @@ function M:Rotate(cfg)
         end
         if self:Queue("Drain Soul", "filler channel") then return end
         if self:HasWand() then
-            if self:Wanding() then return end
+            if self:WandRepeating() then return end
             self:Shoot("wanding")
         elseif self:KnowsSpell("Shadow Bolt") and self:HardCastBoltOK(cfg) then
             self:Queue("Shadow Bolt", "filler nuke")
