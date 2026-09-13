@@ -4,6 +4,24 @@ All notable changes to **Aegis: Single Button Rotation** (formerly **AutoRota**)
 
 ---
 
+## v1.2.29 — Thunder Clap allowed in Defensive Stance
+
+### 🔧 Changed — Warrior: Thunder Clap usable in Defensive Stance
+
+Thunder Clap was gated to Battle Stance only, which was the vanilla 1.12 rule. Turtle
+changed this in patch 1.16.1 ("Thunder Clap became usable in Defensive Stance"), and the
+module had never been updated to match.
+
+`STANCE_REQ["Thunder Clap"]` now allows Battle and Defensive. Everything else about it is
+unchanged: it stays an opt-in AoE filler (`useThunderClap`, off by default in every
+template, including Protection), in the same priority slot below Whirlwind and above
+Sunder Armor upkeep. A Defensive-stance tank with the toggle on can now use it instead of
+having every attempt rejected by the client.
+
+Resolves audit item W2 (`docs/audit-phase1-rotations.md`).
+
+---
+
 ## v1.2.28 — spec tabs, ground spells, and a start that cannot stop
 
 ### ✨ Hunter — three spec tabs, a single/AoE column per switch, two macros
