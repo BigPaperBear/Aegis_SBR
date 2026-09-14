@@ -137,7 +137,7 @@ local STANCE_REQ = {
     ["Execute"]       = { "Battle Stance", "Berserker Stance" },
     ["Overpower"]     = { "Battle Stance" },
     ["Revenge"]       = { "Defensive Stance" },
-    ["Thunder Clap"]  = { "Battle Stance" },
+    ["Thunder Clap"]  = { "Battle Stance", "Defensive Stance" },
     ["Charge"]        = { "Battle Stance" },
     ["Rend"]          = { "Battle Stance", "Defensive Stance" },
     ["Recklessness"]  = { "Berserker Stance" },
@@ -904,7 +904,7 @@ function M:Rotate(cfg)
         end
     end
 
-    -- 1f. Thunder Clap for AoE (Battle stance in 1.12).
+    -- 1f. Thunder Clap for AoE (Battle or Defensive stance on Turtle since 1.16.1).
     if aoe and cfg.useThunderClap and self:Try("Thunder Clap", "AoE") then return end
 
     -- 1g. Sunder Armor upkeep (threat / armor reduction).

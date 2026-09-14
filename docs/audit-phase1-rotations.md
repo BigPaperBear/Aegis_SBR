@@ -298,7 +298,7 @@ back to home stance. Stance requirements are vanilla-1.12-conservative by design
 | # | Ability / order | What the code does | What research says | Source + confidence | Recommended action | RISK if changed |
 |---|---|---|---|---|---|---|
 | W1 | **Battle Shout missing** | ✅ **IMPLEMENTED v0.15.3** — `useBattleShout` (default ON): refreshed when missing / <30s left, placed below the strikes so it never delays one | "Maintain **Battle Shout**" — listed for Arms AND Fury as the first rotation element | rotations.md Arms/Fury `[T]` | **DONE** (user sign-off). Buff-time gated, rage-gated, skipped in Execute | Placement resolved: below strikes = ~one GCD every 2 min, never delays a strike |
-| W2 | **Prot: Thunder Clap stance gate** | `STANCE_REQ["Thunder Clap"] = Battle only` (vanilla-conservative) + prot template ships `useThunderClap = false` — a Defensive tank never TCs | "**Thunder Clap is usable in Defensive Stance** = primary AoE threat" for Turtle prot | rotations.md Prot `[T]` | **Verify in-game, then relax the stance list** and flip the prot template default. The module header explicitly says stance rules stay conservative until Turtle confirms — this is that confirmation case | If TC is NOT defensive-legal on live, the rotation burns a press on a rejected cast every AoE cycle — hence verify first |
+| W2 | **Prot: Thunder Clap stance gate** | ✅ **IMPLEMENTED** — `STANCE_REQ["Thunder Clap"]` now allows Battle and Defensive. Priority position and `useThunderClap` default (off) unchanged | "**Thunder Clap is usable in Defensive Stance** = primary AoE threat" for Turtle prot | rotations.md Prot `[T]` | **DONE** (user sign-off, stance-gate only) | Resolved: no more rejected casts from an over-conservative gate |
 | W3 | **Prot: Revenge fires above Shield Slam** | Priority: Revenge (reactive window) → … → Shield Slam | "**Shield Slam = top single-target threat** (Turtle: scales with AP) → Revenge when available"; Turtle note: Revenge threat is FIXED and doesn't scale | rotations.md Prot `[T]` | **Report + swap candidates**: SS-before-Revenge matches Turtle's scaling claim. One-line order swap, but it IS a priority change → sign-off + threat test | Revenge's 5s window can expire while SS + GCD resolve — the swap trades a possibly-lost Revenge for faster SS; measure, don't guess |
 | W4 | **Prot: Demoralizing Shout missing** | ✅ **IMPLEMENTED v0.15.3** — `useDemoShout` (default OFF): debuff-maintained on the target like Rend, re-applied only when it falls off | "Demoralizing Shout for AoE mitigation" (prot); also in the leveling line | rotations.md Prot/Leveling `[T]`/`[V]` | **DONE** (user sign-off), opt-in. Debuff-tracked, rage-gated, skipped in Execute | Default OFF respects the 16-debuff-cap caution; the user opts in when tanking |
 | W5 | **Arms: Rend default off** | `useRend = false` in the arms template (toggle fully implemented) | Arms: "keep **Rend** up (2H)" | rotations.md Arms `[T]` baseline/`[V]` rotation | **Template-level user decision**: flip arms template default on. Existing profiles unaffected | Rend on high-armor raid bosses was often skipped in vanilla practice; `[V]`-grade evidence — cheap either way |
@@ -434,8 +434,9 @@ between CDs) → filler (wand with DoT-expiry stop, Shadow Bolt, or Drain Life).
 ## Cross-class summary (headline items for sign-off)
 
 **Most likely real, cheapest to verify** (all `/sbr debug`-checkable in minutes):
-Paladin P1 (Zeal 3 vs 5), Warrior W2 (Thunder Clap in Defensive), Mage M4 (Arcane Surge
-availability), ~~Druid D5 (Eclipse proc model)~~ — D5 resolved 2026-09-03, see the row.
+Paladin P1 (Zeal 3 vs 5), ~~Warrior W2 (Thunder Clap in Defensive)~~ — W2 resolved, see the
+row, Mage M4 (Arcane Surge availability), ~~Druid D5 (Eclipse proc model)~~ — D5 resolved
+2026-09-03, see the row.
 
 **Missing Turtle-core abilities** (each needs the live spell confirmed, then a gated
 opt-in): Shaman S1 Molten Blast (biggest single gap in the audit), S2 Chain Lightning,
