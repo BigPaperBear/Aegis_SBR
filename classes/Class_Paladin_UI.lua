@@ -259,9 +259,8 @@ function M:BuildBody(ui, parent)
     end
 
     L:Header("Seal and judgement", "heal")
-    self.healSealDD       = L:Dropdown("healSeal", "Seal", 200, set("healSeal"))
-    self.healManaSelfRow  = L:Row{ key = "healManaSelf",  label = "Keep the seal up while swinging", onToggle = set("healManaSelf") }
-    self.healManaJudgeRow = L:Row{ key = "healManaJudge", label = "Judge it onto the mob",           onToggle = set("healManaJudge") }
+    self.healJudgeDD      = L:Dropdown("healJudgeSeal", "Judge onto the mob", 180, set("healJudgeSeal"))
+    self.healSealDD       = L:Dropdown("healSeal", "Keep up while swinging", 180, set("healSeal"))
     self.healJudgeHLRow   = L:Row{ key = "healJudgeHL",   label = "Pre-load Holy Judgement",     spell = "Judgement", onToggle = set("healJudgeHL") }
 
     -- Last section on every tab: which Goblin Brainwashing Device slot this
@@ -301,7 +300,7 @@ function M:BuildBody(ui, parent)
     ui:Tip(self.spellCB.exorcism.cb,       "Exorcism",        "Strong nuke, used on cooldown but only against Undead and Demon targets.", "Held during mana recovery.")
     ui:Tip(self.spellCB.holyStrike.cb, "Holy Strike", "Shares the 6s strike cooldown with Crusader Strike.", "With Vengeful Strikes it grants Holy Might. Even untalented it returns mana and heals the group.")
     ui:Tip(self.spellCB.crusaderStrike.cb, "Crusader Strike", "Shares the 6s strike cooldown with Holy Strike.", "Builds Zeal. Tank: with Righteous Strikes it also loads the block buff Zealous Defense.")
-    ui:Tip(self.strikeStyleDD, "Both-on strategy", "Used only when BOTH strikes are enabled. Enable a single strike alone to force just that one.", "Auto DPS keeps Zeal and, if talented, Holy Might up. Tank block keeps Zealous Defense loaded, else strikes for aggro.")
+    ui:Tip(self.strikeStyleDD, "Both-on strategy", "Used only when BOTH strikes are enabled. Enable a single strike alone to force just that one.", "Auto DPS keeps Zeal and, if talented, Holy Might up. Tank block keeps Zealous Defense loaded, else strikes for aggro. HS, then alternate: Holy Strike opens every fight, then the two strictly alternate.")
     ui:Tip(self.downrankRow.cb, "Downrank when low", "Use lower ranks of Holy/Crusader Strike as raw mana drops, to keep swinging while leveling.", "Full rank until mana nears a rank's cost. A large pool rarely downranks.")
 
     ui:Tip(self.manaRow.cb, "Mana management", "Below the lower value, hold Seal of Wisdom to recover mana.", "Above the upper value, return to normal damage seals.")
@@ -343,9 +342,8 @@ function M:BuildBody(ui, parent)
     ui:Tip(self.prioAddBtn, "Add target", "Adds your current target to the end of the priority list.", "Names, not raid slots, so the list survives a regroup. Typically the main tank first and yourself second.")
     ui:Tip(self.prioClearBtn, "Clear", "Empties the priority list.")
     ui:Tip(self.ratioHealthyRow.slider, "Holy Light below", "Holy Light is only used on a target under this health, and only when no Flash of Light is big enough to cover the deficit.", "60% is the recommended value. At 0 Holy Light is never used; at 100 it is used whenever the fast heal cannot cover the need. The Holy Judgement buff overrides it either way.")
-    ui:Tip(self.healSealDD, "Seal", "The seal the healer keeps up and judges. Wisdom returns mana, Light returns health.", "Agree it with the other paladins: a judgement already on the mob is one the group has, and yours is better spent on a different one.")
-    ui:Tip(self.healManaSelfRow.cb, "Keep the seal up while swinging", "Refreshes the chosen seal on you - but only while auto-attack is running, since the seal only pays back through hits.", "Only fires when nobody needs healing, so it never delays a heal.")
-    ui:Tip(self.healManaJudgeRow.cb, "Judge it onto the mob", "Judges the chosen seal onto the target so everyone attacking it benefits.", "Judgement uses a GCD and you cannot heal during that global, so it only fires when nobody needs healing.")
+    ui:Tip(self.healJudgeDD, "Judge onto the mob", "Once per mob: this seal goes up, is judged onto the target, and the keep seal follows. Light for the group's health, Wisdom for its mana.", "In melee range only, and only when nobody needs healing. Agree it with the other paladins: a judgement already on the mob is one the group has.")
+    ui:Tip(self.healSealDD, "Keep up while swinging", "The seal refreshed on you while auto-attack is running - it only pays back through hits. Wisdom for your own mana.", "Only when nobody needs healing, and never over a judge seal still waiting for its Judgement.")
     ui:Tip(self.healJudgeHLRow.cb, "Pre-load Holy Judgement", "With the Holy Judgement talent, casting Judgement makes your NEXT Holy Light one second faster. This casts it during downtime so the speed-up is already banked when the next big heal is needed.", "Downtime only. Judging to speed up a heal already due would cost a global cooldown: 1.5s + 1.5s is slower than the plain 2.5s heal. 'Judge Wisdom' above grants the same buff anyway.")
 end
 
@@ -391,8 +389,9 @@ function M:RefreshBody(ui, buf)
     local styleOpts = {
         { label = "Auto DPS",   value = "autodps" },
         { label = "Tank block", value = "tankblock" },
+        { label = "HS, then alternate", value = "alternate" },
     }
-    local styleLabel = { autodps = "Auto DPS", tankblock = "Tank block" }
+    local styleLabel = { autodps = "Auto DPS", tankblock = "Tank block", alternate = "HS, then alternate" }
     local scur = buf.strikeStyle or "autodps"
     local bothOn = (buf.spells.holyStrike and buf.spells.crusaderStrike) and true or false
     if bothOn then
@@ -509,13 +508,9 @@ function M:RefreshBody(ui, buf)
     end
     ui:SliderEnable(self.consecCountRow.slider, buf.spells.consecration and true or false)
 
-    -- Heal-mode seal. Both switches need the chosen seal; shown OFF and greyed
-    -- while it is not learned, without touching the stored value.
-    local hseal = buf.healSeal or "Seal of Wisdom"
-    sealDD(self.healSealDD, self.DEBUFF_SEALS, hseal)
-    local sowKnown = self:KnowsSpell(hseal)
-    ui:BindCheck(self.healManaSelfRow,  buf.healManaSelf  and sowKnown, hseal)
-    ui:BindCheck(self.healManaJudgeRow, buf.healManaJudge and sowKnown, hseal)
+    -- Heal-mode seals: the one judged onto the mob and the one kept up.
+    sealDD(self.healJudgeDD, self.DEBUFF_SEALS, buf.healJudgeSeal or "")
+    sealDD(self.healSealDD, self.DEBUFF_SEALS, buf.healSeal or "")
     ui:BindCheck(self.healJudgeHLRow, buf.healJudgeHL)
 
     local hsv = buf.hsMinHP or 100
@@ -627,10 +622,6 @@ function M:RefreshBody(ui, buf)
     self.ratioHealthyRow.slider:SetValue(rhv)
     if self.ratioHealthyRow.slider.valText then
         self.ratioHealthyRow.slider.valText:SetText(rhv > 0 and ("<" .. rhv .. "%") or "never")
-    end
-    if not sowKnown then
-        self.healManaSelfRow.cb:Disable()
-        self.healManaJudgeRow.cb:Disable()
     end
 
     ui:BindCheck(self.cureRow, buf.useCure, "Cleanse")

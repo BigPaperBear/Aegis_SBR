@@ -377,7 +377,7 @@ function M:EnsureAutoShot()
         p.reason = "restarting the shot"
         return true
     end
-    Aegis_SBR:StartRepeating("Auto Shot")
+    if Aegis_SBR.StartRepeating then Aegis_SBR:StartRepeating("Auto Shot") else CastSpellByName("Auto Shot") end
     self.autoShotOn = true
     self.autoShotTarget = self:TargetId()
     self.autoShotT = now
@@ -402,8 +402,22 @@ end
 --
 -- An unreadable cost answers YES (see CanAfford), so a tooltip that failed to
 -- populate can never lock a step out.
+-- A press that reaches a cast and is turned away on cost must say so in the
+-- log, or "it just waits" cannot be told apart from a rotation that decided
+-- nothing. Once per spell per two seconds, so a mana-starved fight does not
+-- drown the log.
+function M:TraceCost(name)
+    if not self:Tracing() then return end
+    local now = GetTime()
+    if not self.costTraced then self.costTraced = {} end
+    if (self.costTraced[name] or 0) > now - 2.0 then return end
+    self.costTraced[name] = now
+    self:Trace("skip " .. name .. " (cost)")
+end
+
 function M:Pick(name, reason)
-    if not Aegis_SBR:CanAfford(name) then return false end
+    if not Aegis_SBR:CanAfford(name) then self:TraceCost(name); return false end
+    if not Aegis_SBR.deciding and self:Tracing() then self:Trace("-> " .. name .. " (" .. (reason or "") .. ")") end
     return Aegis_SBR.Pick(self, name, reason)
 end
 
@@ -411,13 +425,16 @@ end
 -- the Auto Shot in progress; falls back to a direct cast without the queue.
 function M:Queue(name, reason)
     if not self:KnowsSpell(name) then return false end
-    if not Aegis_SBR:CanAfford(name) then return false end
+    if not Aegis_SBR:CanAfford(name) then self:TraceCost(name); return false end
     if Aegis_SBR.deciding then
         local p = Aegis_SBR.decidePlan
         p.spell = name; p.reason = reason; p.queue = true
         return true
     end
     Aegis_SBR:NoteSpellCast(name)
+    -- Every send in the log, with its reason: the per-press line says what the
+    -- rotation saw, this says what it did with it.
+    if self:Tracing() then self:Trace("-> " .. name .. " (" .. (reason or "") .. ")" .. (QueueSpellByName and " queued" or "")) end
     if QueueSpellByName then QueueSpellByName(name) else CastSpellByName(name) end
     return true
 end
@@ -1016,7 +1033,7 @@ function M:Rotate(cfg)
     local effectiveSting = self:ResolveSting(cfg)
 
     if self:Tracing() then
-        self:Trace("spec=" .. (cfg.spec or "?") .. "/" .. (melee and "melee" or "ranged")
+        self:Trace("spec=" .. (cfg.spec or "?") .. "/" .. (melee and "melee" or "ranged") .. (aoe and " AOE" or "")
             .. " hp=" .. floor(targetHP)
             .. " sting=" .. (cfg.sting ~= "" and (cfg.sting
                 .. (effectiveSting ~= cfg.sting and ("->" .. effectiveSting) or "")
@@ -1154,11 +1171,18 @@ function M:Rotate(cfg)
                 self.stingQueuedT = now   -- protect the queued shot from eviction
             end)
             return
-        elseif self.stingQueuedT and (now - self.stingQueuedT) < STING_QUEUE_HOLD then
+        elseif self.stingQueuedT and (now - self.stingQueuedT) < STING_QUEUE_HOLD
+            and not self:DebuffUpAny(effectiveSting) then
             -- Sting was just queued but cannot be read on the target yet. Hold
             -- here instead of queuing Steady / Multi / Arcane, which would
             -- overwrite the still-pending sting in Nampower's single-slot queue
             -- before it fires. Auto Shot (handled above) keeps going meanwhile.
+            --
+            -- Only while the sting is NOT yet on the target: once it reads back
+            -- the queue slot is free and the hold has nothing to protect. It
+            -- used to run its full length regardless - a log showed the sting
+            -- up 0.25s after the send and the rotation silent for the next 1.5s
+            -- on every pull.
             return
         end
     end

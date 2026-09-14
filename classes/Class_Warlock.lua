@@ -47,7 +47,7 @@ local M = Aegis_SBR:NewClassModule("WARLOCK")
 M.uiTitle = "Warlock"
 -- Rotate runs under Aegis_SBR:Preview without casting (see Pick/Later).
 M.previewReady = true
-M.uiHeight = 862
+M.uiHeight = 940
 M.meleeAutoAttack = false   -- caster, no white melee swing
 
 -- Talent that turns on the free instant Shadow Bolt proc (Shadow Trance).
@@ -308,6 +308,7 @@ wlCastEventFrame:RegisterEvent("PLAYER_REGEN_ENABLED")
 wlCastEventFrame:SetScript("OnEvent", function()
     if event == "PLAYER_REGEN_ENABLED" then
         M.dotImmune = {}
+        M.dotLanded = {}
         return
     end
     if event == "CHAT_MSG_SPELL_SELF_DAMAGE" then
@@ -378,6 +379,11 @@ wlCastEventFrame:SetScript("OnEvent", function()
         -- throttle itself - see there.
         M.castEventSeen = true
         M.dotThrottle[name] = { id = pend.id, t = GetTime() }
+        -- A confirmed cast on this target that has not yet been read back as a
+        -- debuff. ApplyDot counts these when it is about to re-send: two in a
+        -- row with nothing ever read is an immunity the client never announced.
+        local key = tostring(pend.id) .. "|" .. name
+        M.dotLanded[key] = (M.dotLanded[key] or 0) + 1
     end
 end)
 
@@ -554,6 +560,11 @@ function M:NormalizeProfile(c)
     if c.lifeTap == nil then c.lifeTap = false end
     if c.lifeTapMana == nil then c.lifeTapMana = 20 end
     if c.lifeTapHpMin == nil then c.lifeTapHpMin = 40 end
+    if c.lifeTapIdle == nil then c.lifeTapIdle = false end
+    if c.lifeTapIdleMana == nil then c.lifeTapIdleMana = 100 end
+    if c.drainMana == nil then c.drainMana = false end
+    if c.useHellfire == nil then c.useHellfire = false end
+    if c.hellfireHp == nil then c.hellfireHp = 50 end
     if c.wandManaFloor == nil then c.wandManaFloor = 15 end
     -- What fills the gap while Dark Harvest is on cooldown (Dark Harvest filler
     -- only). Defaults to the wand, which is what the gap used to be hardcoded to.
@@ -667,12 +678,24 @@ end
 -- Everything that CHANNELS. Movement breaks a channel outright, so starting one
 -- while running is not a slightly worse cast - it is a global cooldown spent on
 -- nothing at all.
+-- The channels aimed at the target - the ones a range check applies to.
+-- Hellfire is around you, Rain of Fire is on the ground, Health Funnel is on
+-- the pet.
+M.TARGET_CHANNELS = {
+    ["Drain Life"]   = true,
+    ["Drain Soul"]   = true,
+    ["Dark Harvest"] = true,
+    ["Drain Mana"]   = true,
+}
+
 M.CHANNELED = {
     ["Drain Life"]    = true,
     ["Drain Soul"]    = true,
     ["Dark Harvest"]  = true,
     ["Health Funnel"] = true,
     ["Rain of Fire"]  = true,
+    ["Drain Mana"]    = true,
+    ["Hellfire"]      = true,
 }
 
 -- Cast time of what this module sends that is neither a DoT nor a channel.
@@ -720,10 +743,57 @@ function M:Queue(name, reason, busy)
         if self:Tracing() then self:Trace("moving, no " .. name) end
         return false
     end
+    -- A channel aimed at the target that cannot reach it. Drain Life reaches
+    -- twenty yards where the DoTs reach thirty, so at the edge of range every
+    -- press sent a channel the client refused - reported as spamming out of
+    -- range while everything else was in range. Refused here so the caller
+    -- falls through to what it would have done otherwise: the wand.
+    if M.TARGET_CHANNELS[name] and not Aegis_SBR:SpellReaches(name, "target") then
+        if self:Tracing() then self:Trace("out of range, no " .. name) end
+        return false
+    end
+    if name == "Drain Life" and self:LifeDrainImmune() then
+        if self:Tracing() then self:Trace("target takes no life drain, no Drain Life") end
+        return false
+    end
     if Aegis_SBR.deciding then
         local p = Aegis_SBR.decidePlan
         p.spell = name; p.reason = reason; p.queue = true
         return true
+    end
+    -- Nothing in flight, and the spell cannot go out yet: HOLD the press
+    -- instead of queueing. Nampower's queue exists to hold a spell until what
+    -- is already in flight finishes; behind a bare global cooldown it has
+    -- nothing to hold against, and on some clients the spell is never fired at
+    -- all - a tester's log had every Corruption after Curse of Agony die that
+    -- way, caught only by the dead-send guard a second later. The hold costs
+    -- one press interval at most: the next press reads the cooldown gone and
+    -- casts directly. "held" is truthy so every caller stops here like a send,
+    -- and distinct from true so nothing is stamped as sent.
+    --
+    -- Two things hold: the global cooldown (read off the spell itself), and the
+    -- tail of a cast-time spell that has just landed - a direct cast a few
+    -- hundredths of a second after the land is dropped silently by the client
+    -- (measured: Immolate lands, Curse of Agony sent 40ms later, nothing).
+    -- A spell on its OWN cooldown is not held, it is refused, so the caller
+    -- falls through.
+    local inFlight = M.casting or M.channeling
+    if not inFlight then
+        local slot = Aegis_SBR:FindSpellSlot(name)
+        if slot then
+            local start, dur = GetSpellCooldown(slot, BOOKTYPE_SPELL)
+            local left = (start and start > 0) and (start + dur - GetTime()) or 0
+            if left > GCD + 0.1 then return false end
+            if left > 0 then
+                if self:Tracing() then self:Trace("cooldown " .. string.format("%.2f", left) .. "s, holding " .. name) end
+                return "held"
+            end
+        end
+        local idleFor = GetTime() - (self.busyUntil or 0)
+        if M.lastSentHadCast and idleFor < DIRECT_MARGIN and idleFor > -GCD then
+            if self:Tracing() then self:Trace("cast tail, holding " .. name) end
+            return "held"
+        end
     end
     Aegis_SBR:NoteSpellCast(name)
     -- Which channel a later SPELLCAST_CHANNEL_START belongs to. Kept separately
@@ -773,10 +843,11 @@ function M:Queue(name, reason, busy)
     -- Curse of Agony directly 40ms later, and nothing happens at all. The queue
     -- is the right tool for that moment; direct is only for a client that has
     -- been idle for long enough to be sure of it.
-    local idleFor = GetTime() - (self.busyUntil or 0)
-    local direct = not QueueSpellByName
-        or ((self:Wanding() or idleFor >= DIRECT_MARGIN or M.forceDirect)
-            and Aegis_SBR:IsReady(name) and not M.casting)
+    -- Direct unless a cast or channel is actually running: that is the one
+    -- case the queue is for. The global cooldown and the cast tail were
+    -- handled above by holding the press, so a direct cast here is one the
+    -- client can take.
+    local direct = not QueueSpellByName or not inFlight or M.forceDirect
     M.forceDirect = nil
     if direct then
         CastSpellByName(name)
@@ -789,7 +860,11 @@ function M:Queue(name, reason, busy)
         -- dead rather than waiting out its full window.
         M.sentDueAt = self.busyUntil or GetTime()
     end
-    self.busyUntil = GetTime() + self:BusyFor(name, busy)
+    local busyFor = self:BusyFor(name, busy)
+    self.busyUntil = GetTime() + busyFor
+    -- Whether the tail rule above applies to the NEXT send: only after a spell
+    -- with a cast time or a channel, never after an instant.
+    M.lastSentHadCast = busyFor > GCD or M.CHANNELED[name] or false
     return true
 end
 
@@ -987,6 +1062,8 @@ local CHANNEL_BASE = {
     ["Drain Life"]    = 5,
     ["Health Funnel"] = 10,
     ["Rain of Fire"]  = 8,
+    ["Drain Mana"]    = 5,
+    ["Hellfire"]      = 15,
 }
 local CHANNEL_TALENTED = {
     ["Drain Life"]   = true,
@@ -1411,6 +1488,47 @@ function M:DotImmune(spellName)
     return self.dotImmune[guid .. "|" .. spellName] and true or false
 end
 
+-- Confirmed casts per "<targetId>|<spell>" not yet read back (see the CAST
+-- handler), and the DoTs this client has ever read back at all. The second is
+-- the guard on the first: a client that cannot read a debuff would otherwise
+-- call every DoT immune after two casts.
+M.dotLanded = {}
+M.dotSeenEver = {}
+
+-- Immunity with no message. Some mobs take a DoT's cast - the client confirms
+-- it, mana is spent - and never carry the debuff, and say nothing: reported on
+-- golems for Siphon Life, re-cast every three seconds for the whole fight.
+-- Two confirmed casts on the same target with the debuff never read in between
+-- is that case, provided this client has read the debuff on SOME target
+-- before (otherwise the reader is what is broken, not the mob).
+function M:NoteDotUnseen(spellName, id)
+    if not self.dotSeenEver[spellName] then return false end
+    local key = tostring(id) .. "|" .. spellName
+    if (self.dotLanded[key] or 0) < 2 then return false end
+    local _, guid = UnitExists("target")
+    if guid then self.dotImmune[guid .. "|" .. spellName] = true end
+    self.dotLanded[key] = nil
+    if self:Tracing() then
+        self:Trace(spellName .. ": two casts confirmed, never seen on the target - immune for this fight")
+    end
+    return true
+end
+
+-- Life drains against this target. Mechanical creatures take neither Drain
+-- Life nor Siphon Life, and the client refuses neither: the channel runs, the
+-- DoT is confirmed, nothing happens. The creature type is the prior, cached
+-- per target; a Siphon Life learned immune the way above stands in for Drain
+-- Life too, since the two share the mechanic.
+function M:LifeDrainImmune()
+    local id = self:TargetId()
+    if id ~= self.drainTypeId then
+        self.drainTypeId = id
+        self.drainImmune = (UnitCreatureType("target") == "Mechanical")
+    end
+    if self.drainImmune then return true end
+    return self:DotImmune("Siphon Life")
+end
+
 -- Casts sent but not yet confirmed CAST or FAIL by UNIT_CASTEVENT, keyed by
 -- spell name -> { id = targetId at cast time, t = time sent }.
 M.dotPending = {}
@@ -1439,7 +1557,8 @@ M.dotPending = {}
 -- same lesson - a detection that never answers must not be the only thing a
 -- decision rests on.
 function M:QueueDot(spellName, id)
-    if not self:Queue(spellName, "DoT missing") then return end
+    -- A hold (see Queue) is truthy but not a send: nothing to stamp.
+    if self:Queue(spellName, "DoT missing") ~= true then return end
     self:Later(function()
         local now = GetTime()
         -- A curse we have no icon for: watch what appears on the target.
@@ -1486,11 +1605,14 @@ end
 function M:ApplyDot(spellName, texFrag, interval)
     interval = interval or 3
     if self:TargetDebuffUp(spellName, texFrag) and self:DotIsMine(spellName) then
+        self.dotSeenEver[spellName] = true
+        self.dotLanded[tostring(self:TargetId()) .. "|" .. spellName] = nil
         return "up"
     end
     -- Immune to this one: report it as handled so the DoT chain moves on to the
     -- next spell instead of stopping here for the rest of the fight.
     if self:DotImmune(spellName) then return "up" end
+    if spellName == "Siphon Life" and self:LifeDrainImmune() then return "up" end
     -- Moving, and this one is not instant: skip it and let the chain carry on to
     -- the DoTs that ARE instant, then to the filler.
     --
@@ -1568,6 +1690,9 @@ function M:ApplyDot(spellName, texFrag, interval)
         if ct > 0 and (ct + CAST_LAND_MARGIN) > allow then allow = ct + CAST_LAND_MARGIN end
         if (now - pend.t) <= allow or M.casting then return "wait" end
     end
+    -- About to re-send. Two confirmed casts on this target with nothing ever
+    -- read back is an unannounced immunity - handled, not re-sent.
+    if self:NoteDotUnseen(spellName, id) then return "up" end
     self:QueueDot(spellName, id)
     return "cast"
 end
@@ -1697,7 +1822,7 @@ function M:Shoot(reason, stop)
     if stop then
         CastSpellByName("Shoot")
     else
-        Aegis_SBR:StartRepeating("Shoot")
+        if Aegis_SBR.StartRepeating then Aegis_SBR:StartRepeating("Shoot") else CastSpellByName("Shoot") end
     end
     return true
 end
@@ -1706,6 +1831,21 @@ end
 -- Rotation. The core has already secured a target (no melee auto
 -- attack for this class). One queued cast per press, DoTs first.
 -- ============================================================
+-- A press with NO target, out of combat: the core hands it here instead of
+-- the rotation. One use so far - Life Tap up to a mana level of the player's
+-- choosing before the next pull, so the health regenerates on the walk and the
+-- mana is there at the pull. The HP floor from the in-combat tap applies; the
+-- combat mana slider does not, this has its own. Nothing else is done here:
+-- with a friendly target, or in combat, the press stays idle as before.
+function M:Prebuff(cfg)
+    if not cfg.lifeTapIdle then return false end
+    if UnitExists("target") or UnitAffectingCombat("player") then return false end
+    if not self:KnowsSpell("Life Tap") then return false end
+    if self:ManaPct() >= (cfg.lifeTapIdleMana or 100) then return false end
+    if self:PlayerHPPct() <= (cfg.lifeTapHpMin or 40) then return false end
+    return self:Pick("Life Tap", "mana before the pull")
+end
+
 function M:Rotate(cfg)
     -- Before every guard below, because they return.
     self:TranceTick()
@@ -2008,6 +2148,17 @@ function M:Rotate(cfg)
         if self:Queue("Health Funnel", "pet is hurt") then return end
     end
 
+    -- P2a Hellfire, on an AoE press only: the pack is ON you - a mob within
+    -- melee range stands in for that, the client cannot count - and Hellfire
+    -- burns everything around you, yourself included, so it needs health to
+    -- spare (its own floor). Ahead of Rain of Fire, which is for a pack you
+    -- are not standing in. A channel like the others: not while moving.
+    if cfg.useHellfire and Aegis_SBR:AoeMode(cfg) and self:KnowsSpell("Hellfire")
+        and not M.casting and self:InMeleeRange()
+        and hp > (cfg.hellfireHp or 50) then
+        if self:Queue("Hellfire", "AoE, the pack is on you") then return end
+    end
+
     -- P2b Rain of Fire, on an AoE press only (/sbr run aoe, or the profile's
     -- AoE toggle). Placed under the mouse by the core (Aegis_SBR:CastAtMouse:
     -- only while the mouse rests on an enemy), sent through Queue so the send
@@ -2166,6 +2317,22 @@ function M:Rotate(cfg)
     local dhFirst = cfg.filler == "Dark Harvest" and self:KnowsSpell("Dark Harvest")
         and self:OwnCDReady("Dark Harvest") and (UnitMana("player") or 0) >= DH_MANA
         and not self:DHRetryHeld()
+    -- Drain Mana ahead of Life Tap, against a target that HAS mana: the same
+    -- mana threshold, but paid by the mob rather than by our health. A mob
+    -- without a mana bar, or with an empty one, is never drained - there the
+    -- tap keeps its turn. A channel: not while moving (Queue refuses), and the
+    -- DoTs get their top-up first, as before every other channel.
+    if cfg.drainMana and self:KnowsSpell("Drain Mana") and not dhFirst and not M.casting
+        and self:ManaPct() < (cfg.lifeTapMana or 20)
+        and UnitPowerType("target") == 0 and (UnitMana("target") or 0) > 0 then
+        local lapsing = self:DotLapsingWithin(order, cfg.chanDotRemain or 0, dotsSuppressed)
+        if lapsing then
+            if self:Tracing() then self:Trace("Drain Mana held: " .. lapsing .. " would lapse during it") end
+            self:QueueDot(lapsing, self:TargetId())
+            return
+        end
+        if self:Queue("Drain Mana", "mana from the target") then return end
+    end
     if cfg.lifeTap and self:KnowsSpell("Life Tap") and not dhFirst then
         if self:ManaPct() < (cfg.lifeTapMana or 20) and self:PlayerHPPct() > (cfg.lifeTapHpMin or 40) then
             self:Queue("Life Tap", "mana from health")
@@ -2396,9 +2563,10 @@ function M:Rotate(cfg)
             end
         end
         if self:Queue(filler, "filler channel") then return end
-        -- Refused, and the only thing Queue refuses a channel for is movement.
-        -- The wand is the one ranged attack that costs nothing to give up.
-        if self:HasWand() and not self:Wanding() then self:Shoot("wanding, moving") end
+        -- Refused - moving, out of the channel's range, or a target that takes
+        -- no life drain. The wand is the one ranged attack that costs nothing
+        -- to give up.
+        if self:HasWand() and not self:Wanding() then self:Shoot("wanding, channel refused") end
     elseif filler then
         if self:Queue(filler, "filler") then return end
         if self:HasWand() and not self:Wanding() then self:Shoot("wanding, filler refused") end

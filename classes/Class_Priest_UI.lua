@@ -20,12 +20,14 @@ function M:BuildBody(ui, parent)
     self.shadowformRow = L:Row{ key = "useShadowform", label = "Hold Shadowform", spell = "Shadowform", onToggle = set("useShadowform") }
     self.mindBlastRow = L:Row{ key = "useMindBlast", label = "Mind Blast", spell = "Mind Blast", onToggle = set("useMindBlast") }
     self.swpRow = L:Row{ key = "useShadowWordPain", label = "Shadow Word: Pain", spell = "Shadow Word: Pain", onToggle = set("useShadowWordPain") }
+    self.veRow = L:Row{ key = "useVampiricEmbrace", label = "Vampiric Embrace", spell = "Vampiric Embrace", onToggle = set("useVampiricEmbrace") }
     self.devouringRow = L:Row{ key = "useDevouringPlague", label = "Devouring Plague", spell = "Devouring Plague", onToggle = set("useDevouringPlague") }
     self.holyFireRow = L:Row{ key = "useHolyFire", label = "Holy Fire", spell = "Holy Fire", onToggle = set("useHolyFire") }
     self.mindFlayRow = L:Row{ key = "useMindFlay", label = "Mind Flay", spell = "Mind Flay", onToggle = set("useMindFlay") }
     self.pwShieldMeleeRow = L:Row{ key = "usePWShieldMelee", label = "Shield in melee", spell = "Power Word: Shield", onToggle = set("usePWShieldMelee") }
     self.spiritTapRow = L:Row{ key = "useSpiritTapFinisher", label = "Finisher (secure kill)", spell = "Mind Blast", onToggle = set("useSpiritTapFinisher"),
         slider = { key = "executeHp", min = 0, max = 100, step = 5, suffix = "%", onChange = set("executeHp") } }
+    self.painSpikeRow = L:Row{ key = "usePainSpike", label = "Pain Spike in the finisher", spell = "Pain Spike", onToggle = set("usePainSpike") }
     self.fillerDD = L:Dropdown("filler", "Filler", 170, set("filler"))
     self.useWandRow = L:Row{ key = "useWand", label = "Use wand", onToggle = set("useWand"),
         slider = { key = "fillerManaFloor", min = 0, max = 100, step = 5, suffix = "%", onChange = set("fillerManaFloor") } }
@@ -86,6 +88,7 @@ function M:BuildBody(ui, parent)
     ui:Tip(self.shadowformRow.cb, "Hold Shadowform", "Stay in Shadowform. While in it, Holy spells (Smite, Holy Fire, heals) are skipped.", "Leave off for a leveling priest who still casts Holy spells.")
     ui:Tip(self.mindBlastRow.cb, "Mind Blast", "Cast on cooldown - the Shadow Weaving trigger and the leveling pull.")
     ui:Tip(self.swpRow.cb, "Shadow Word: Pain", "Keep the DoT up. Turn off in raids to respect debuff-slot limits.")
+    ui:Tip(self.veRow.cb, "Vampiric Embrace", "Keep the one-minute debuff up after Shadow Word: Pain; your party is healed for a share of the shadow damage you deal. Takes a debuff slot and adds threat, so off by default.")
     ui:Tip(self.devouringRow.cb, "Devouring Plague", "Undead-only DoT; used automatically when known.")
     ui:Tip(self.holyFireRow.cb, "Holy Fire", "Fire DoT and a strong nuke. Skipped while in Shadowform.")
     ui:Tip(self.mindFlayRow.cb, "Mind Flay", "Channelled shadow filler. Used when the filler is not the wand and mana is healthy.")
@@ -94,6 +97,7 @@ function M:BuildBody(ui, parent)
     ui:Tip(self.fillerDD, "Filler", "Used when every enabled cast is up. Wand conserves mana (the 5-second rule);", "Mind Flay and Smite spend it. The wand is always used when mana drops below the floor.")
     ui:Tip(self.useWandRow.cb, "Use wand for mana regen", "On: the filler drops to the wand below the mana floor to let mana regenerate (the 5-second rule).", "Off: the priest keeps casting and never wands - it can run dry. With no wand equipped it auto-casts Mind Flay or Smite instead.")
     ui:Tip(self.spiritTapRow.slider, "Finisher below", "Target health percent under which the kill-securing finisher fires.")
+    ui:Tip(self.painSpikeRow.cb, "Pain Spike", "Under the finisher threshold, Pain Spike goes out first: instant shadow burst whose damage heals back after landing, so it is only worth a killing blow.")
     ui:Tip(self.useWandRow.slider, "Wand below mana", "Your mana percent under which the filler drops to the wand to let mana regenerate.")
     ui:Tip(self.healAtRow.slider, "Heal members below", "Members below this health get healed; lower ranks are chosen for small deficits.")
     ui:Tip(self.flashHealRow.cb, "Flash Heal", "Fast, expensive heal reserved for emergencies so it does not drain your mana.")
@@ -128,10 +132,12 @@ function M:RefreshBody(ui, buf)
     ui:BindCheck(self.mindBlastRow, buf.useMindBlast, "Mind Blast")
     ui:BindCheck(self.swpRow, buf.useShadowWordPain, "Shadow Word: Pain")
     ui:BindCheck(self.devouringRow, buf.useDevouringPlague, "Devouring Plague")
+    ui:BindCheck(self.veRow, buf.useVampiricEmbrace, "Vampiric Embrace")
     ui:BindCheck(self.holyFireRow, buf.useHolyFire, "Holy Fire")
     ui:BindCheck(self.mindFlayRow, buf.useMindFlay, "Mind Flay")
     ui:BindCheck(self.pwShieldMeleeRow, buf.usePWShieldMelee, "Power Word: Shield")
     ui:BindCheck(self.spiritTapRow, buf.useSpiritTapFinisher, "Mind Blast")
+    ui:BindCheck(self.painSpikeRow, buf.usePainSpike, "Pain Spike")
     self.spiritTapRow.slider:SetValue(buf.executeHp or 0);   self.spiritTapRow.slider.valText:SetText((buf.executeHp or 0) .. "%")
     self.useWandRow.slider:SetValue(buf.fillerManaFloor or 0); self.useWandRow.slider.valText:SetText((buf.fillerManaFloor or 0) .. "%")
     ui:BindCheck(self.useWandRow, buf.useWand)

@@ -37,6 +37,8 @@ function M:BuildBody(ui, parent)
     self.nightfallRow = L:Row{ key = "nightfall", label = "Shadow Bolt on Shadow Trance", spell = "Shadow Bolt", onToggle = set("nightfall") }
 
     L:Header("Area (AoE press)")
+    self.hellfireRow = L:Row{ key = "useHellfire", label = "Hellfire when the pack is on you", spell = "Hellfire", onToggle = set("useHellfire"),
+        slider = { key = "hfHp", min = 0, max = 100, step = 5, suffix = "%", onChange = set("hellfireHp") } }
     self.rofRow = L:Row{ key = "useRainOfFire", label = "Rain of Fire at the mouse", spell = "Rain of Fire", onToggle = set("useRainOfFire") }
 
     L:Header("Mana (Life Tap)")
@@ -44,6 +46,9 @@ function M:BuildBody(ui, parent)
         slider = { key = "ltMana", min = 0, max = 100, step = 5, suffix = "%", onChange = set("lifeTapMana") } }
     self.tapHpRow = L:Row{ label = "Keep HP above",
         slider = { key = "ltHp", min = 0, max = 100, step = 5, suffix = "%", onChange = set("lifeTapHpMin") } }
+    self.tapIdleRow = L:Row{ key = "lifeTapIdle", label = "Tap out of combat up to", spell = "Life Tap", onToggle = set("lifeTapIdle"),
+        slider = { key = "ltIdle", min = 0, max = 100, step = 5, suffix = "%", onChange = set("lifeTapIdleMana") } }
+    self.drainManaRow = L:Row{ key = "drainMana", label = "Drain Mana from casters", spell = "Drain Mana", onToggle = set("drainMana") }
     self.wandFloorRow = L:Row{ label = "Wand below mana",
         slider = { key = "wmFloor", min = 0, max = 50, step = 5, suffix = "%", onChange = set("wandManaFloor") } }
 
@@ -79,10 +84,15 @@ function M:BuildBody(ui, parent)
     ui:Tip(self.petRow.cb, "Pet attack", "Send the active pet onto your target.")
     ui:Tip(self.petMeleeRow.cb, "Pet only in melee range", "Send the pet only when the target is within melee range,", "so an accidentally targeted far enemy does not pull the pet away.")
     ui:Tip(self.nightfallRow.cb, "Shadow Bolt on Shadow Trance", "When the Nightfall proc lights up, fire the free instant Shadow Bolt.", "Auto-enabled when the Nightfall talent is detected; this toggle forces it on otherwise. Only used when the filler is not already Shadow Bolt.")
+    ui:Tip(self.hellfireRow.cb, "Hellfire", "On an AoE press with a mob in melee range: channel Hellfire, ahead of Rain of Fire. It burns you too, so only above the health on the slider.", "Not while moving, like every channel.")
+    ui:Tip(self.hellfireRow.slider, "Hellfire above", "Your health percent above which Hellfire is used.")
     ui:Tip(self.rofRow.cb, "Rain of Fire at the mouse", "On an AoE press (/sbr run aoe). Lands under the mouse: hold the mouse on the feet of the pack when pressing; with the mouse off any enemy the press skips it. Not while moving.")
     ui:Tip(self.tapRow.cb, "Life Tap", "Convert health to mana when mana is low and health is high.")
     ui:Tip(self.tapRow.slider, "Tap below mana", "Life Tap only when mana is under this value.")
     ui:Tip(self.tapHpRow.slider, "Keep HP above", "Life Tap only while health stays over this value.")
+    ui:Tip(self.tapIdleRow.cb, "Tap out of combat", "With no target and out of combat, each press Life Taps until mana reaches the slider value - the HP floor above still applies.")
+    ui:Tip(self.tapIdleRow.slider, "Tap up to", "Mana percent to reach before the next pull. 100 = full.")
+    ui:Tip(self.drainManaRow.cb, "Drain Mana from casters", "Below the Life Tap mana line, a target with mana is drained instead of tapping. Mobs without mana are never drained; Life Tap covers those.", "A channel: not while moving, and lapsing DoTs are topped up first.")
     ui:Tip(self.dhDotRow.slider, "Top up DoTs before Dark Harvest",
         "A DoT with less time left than this is re-applied before Dark Harvest starts.",
         "Dark Harvest speeds up the DoTs already on the target, so one that drops out partway through loses that boost for the rest of the channel - which is why this margin is the larger of the two. 0 starts the channel whatever the DoTs are doing.")
@@ -165,7 +175,14 @@ function M:RefreshBody(ui, buf)
     end
     ui:BindCheck(self.nightfallRow, buf.nightfall)
     ui:BindCheck(self.rofRow, buf.useRainOfFire, "Rain of Fire")
+    ui:BindCheck(self.hellfireRow, buf.useHellfire, "Hellfire")
+    self.hellfireRow.slider:SetValue(buf.hellfireHp or 50); self.hellfireRow.slider.valText:SetText((buf.hellfireHp or 50) .. "%")
+    ui:SliderEnable(self.hellfireRow.slider, buf.useHellfire and true or false)
     ui:BindCheck(self.tapRow, buf.lifeTap)
+    ui:BindCheck(self.tapIdleRow, buf.lifeTapIdle, "Life Tap")
+    ui:BindCheck(self.drainManaRow, buf.drainMana, "Drain Mana")
+    self.tapIdleRow.slider:SetValue(buf.lifeTapIdleMana or 100); self.tapIdleRow.slider.valText:SetText((buf.lifeTapIdleMana or 100) .. "%")
+    ui:SliderEnable(self.tapIdleRow.slider, buf.lifeTapIdle and true or false)
 
     self.tapRow.slider:SetValue(buf.lifeTapMana or 0);  self.tapRow.slider.valText:SetText((buf.lifeTapMana or 0) .. "%")
     self.tapHpRow.slider:SetValue(buf.lifeTapHpMin or 0); self.tapHpRow.slider.valText:SetText((buf.lifeTapHpMin or 0) .. "%")

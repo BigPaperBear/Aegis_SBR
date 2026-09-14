@@ -17,7 +17,7 @@
 -- ============================================================
 
 Aegis_SBR = {
-    ver = "1.2.29",
+    ver = "1.2.30",
     classes = {},     -- token -> module table
     active = nil,      -- the module for this character's class
     Loaded = false,
@@ -385,6 +385,7 @@ function Aegis_SBR:PickExtra(name)
     -- and leaving it unrecorded meant its refusal was blamed on whatever spell
     -- came before it - the same misattribution auto-attack caused.
     Aegis_SBR:NoteSpellCast(name)
+    if self:Tracing() then self:Trace("+ " .. name .. " (off the global cooldown)") end
     CastSpellByName(name)
     return true
 end

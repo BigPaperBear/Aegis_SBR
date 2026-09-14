@@ -4,6 +4,71 @@ All notable changes to **Aegis: Single Button Rotation** (formerly **AutoRota**)
 
 ---
 
+## v1.2.30 — held, not queued
+
+### 🔧 Warlock: a press behind a bare global cooldown is held, not queued
+
+Nampower's queue holds a spell until what is already in flight finishes. Behind a bare global
+cooldown there is nothing in flight, and on some clients the queued spell is never fired at
+all: a tester's log had every Corruption after Curse of Agony die that way, caught by the
+dead-send guard a second later — the reported holes between instants.
+
+The module now queues only behind a running cast or channel. Otherwise, while the global
+cooldown runs (read off the spell itself), the press is **held** — nothing sent, nothing
+stamped — and the next press casts directly the moment it is over. The same hold covers the
+tail of a cast-time spell for a third of a second, where a direct cast is dropped silently by
+the client. A spell on its own cooldown is refused as before, so the caller falls through.
+Cost: at most one press interval; the dead-send guard stays as the safety net.
+
+### 🔧 Warlock: what the client does not say
+
+- **Channels only in their own range.** Drain Life reaches twenty yards where the DoTs reach
+  thirty; at the edge every press sent a channel the client refused. A channel aimed at the
+  target is refused in the module when it cannot reach, and the wand takes over.
+- **Mechanical creatures take no life drain**, and the client refuses neither Drain Life nor
+  Siphon Life on them: the channel runs, the DoT is confirmed, nothing happens. The creature
+  type is the prior; on top, a DoT confirmed cast twice on the same target and never read back
+  is treated as immune for the fight — only on a client that has read that DoT before.
+- **Drain Mana from casters** (new switch, off): below the Life Tap mana line, a target with
+  mana is drained instead of tapping. Mobs without mana are never drained.
+- **Tap out of combat** (new switch with slider, off): with no target and out of combat, each
+  press Life Taps up to the chosen mana percent. The HP floor still applies.
+- **Hellfire when the pack is on you** (new, off, AoE press): with a mob in melee range,
+  ahead of Rain of Fire, above a health floor of its own.
+
+### 🔧 Paladin: two seals for the healer, a fixed strike pattern for the tank
+
+- **Judge onto the mob** and **Keep up while swinging** are two dropdowns on the heal tab. The
+  judge seal goes up and is judged once per mob (in melee range, like the retribution step),
+  the keep seal is refreshed while swinging and never cast over a judge seal still waiting for
+  its Judgement — so a healer judges Light for the group and swings with Wisdom. Older
+  profiles migrate from the one seal and two switches.
+- **HS, then alternate**: a third both-on strike strategy. Holy Strike opens every fight, then
+  the two strictly alternate; `/sbr strike alternate`.
+
+### 🔧 Priest: Vampiric Embrace, Pain Spike, the order the spec plays
+
+- **Vampiric Embrace** is kept up like a DoT (one minute, per caster; off by default outside
+  the shadow template, since it takes a debuff slot and adds threat).
+- The DPS order follows the shadow priest's own: Shadow Word: Pain, Vampiric Embrace, then
+  Mind Blast, Mind Flay to fill. Mind Blast used to sit above the DoTs.
+- **Pain Spike** leads the kill-securing finisher: an instant shadow burst on a thirty second
+  cooldown whose damage heals itself back after landing, so it is worth exactly a killing blow.
+
+### 🔧 Hunter: the sting hold, and the log says what was sent
+
+- After a sting the rotation stood still for a fixed 1.5 seconds even when the sting was
+  readable on the target a quarter of a second later. The hold ends when the sting reads.
+- `/sbr trace` records every send with its reason, the presses turned away on cost, and
+  whether the press was read as AoE.
+
+### 🔧 Smaller
+
+- A class file handed out ahead of the core that carries the start-only wand call (v1.2.28)
+  no longer errors on the wand; it falls back to the plain toggle.
+
+---
+
 ## v1.2.29 — Thunder Clap allowed in Defensive Stance
 
 ### 🔧 Changed — Warrior: Thunder Clap usable in Defensive Stance

@@ -39,7 +39,7 @@ local M = Aegis_SBR:NewClassModule("PRIEST")
 M.uiTitle = "Priest"
 -- Rotate runs under Aegis_SBR:Preview without casting (see Pick/Later).
 M.previewReady = true
-M.uiHeight = 680
+M.uiHeight = 732
 M.meleeAutoAttack = false   -- caster, no white melee swing
 
 -- Chat output is shared in the core; this shim keeps call sites unchanged.
@@ -150,6 +150,7 @@ M.templates = {
         useInnerFire = true, useShadowform = true,
         usePWShieldMelee = false,
         useMindBlast = true, useShadowWordPain = true, useDevouringPlague = true,
+        useVampiricEmbrace = true,
         useHolyFire = false, useMindFlay = true,
         useSpiritTapFinisher = false, executeHp = 20,
         filler = "Mind Flay", fillerManaFloor = 15, useWand = true,
@@ -175,9 +176,11 @@ function M:NormalizeProfile(c)
     if c.useMindBlast == nil then c.useMindBlast = true end
     if c.useShadowWordPain == nil then c.useShadowWordPain = true end
     if c.useDevouringPlague == nil then c.useDevouringPlague = true end
+    if c.useVampiricEmbrace == nil then c.useVampiricEmbrace = false end
     if c.useHolyFire == nil then c.useHolyFire = true end
     if c.useMindFlay == nil then c.useMindFlay = true end
     if c.useSpiritTapFinisher == nil then c.useSpiritTapFinisher = true end
+    if c.usePainSpike == nil then c.usePainSpike = true end
     if c.executeHp == nil then c.executeHp = 25 end
     if c.filler == nil then c.filler = "Wand" end
     if c.fillerManaFloor == nil then c.fillerManaFloor = 25 end
@@ -272,7 +275,9 @@ function M:Wand()
         p.spell = "Shoot"; p.reason = "wanding"
         return true
     end
-    Aegis_SBR:StartRepeating("Shoot")
+    -- Guarded: a class file handed out ahead of the core that carries this
+    -- (v1.2.28) must still wand rather than error.
+    if Aegis_SBR.StartRepeating then Aegis_SBR:StartRepeating("Shoot") else CastSpellByName("Shoot") end
     return true
 end
 
@@ -361,11 +366,12 @@ M.dotThrottle = {}
 -- The DoTs this module maintains, for the resist handler at the bottom of the
 -- file. Kept next to the throttle it clears, since the two only make sense
 -- together.
-M.DOT_NAMES = { "Shadow Word: Pain", "Devouring Plague", "Holy Fire" }
+M.DOT_NAMES = { "Shadow Word: Pain", "Vampiric Embrace", "Devouring Plague", "Holy Fire" }
 -- Applied duration of each DoT, handed to the ledger so a second priest on the
 -- same mob is told apart from us. Only the length matters here, not the damage.
 M.DOT_DUR = {
     ["Shadow Word: Pain"] = 18,
+    ["Vampiric Embrace"]  = 60,   -- Turtle spell 15286: one minute
     ["Devouring Plague"]  = 24,
     ["Holy Fire"]         = 10,
 }
@@ -723,6 +729,12 @@ function M:Rotate(cfg)
     -- Spirit Tap finisher: under the execute threshold, burst to secure the kill
     -- (and the experience), Mind Blast then Smite.
     if cfg.useSpiritTapFinisher and self:TargetHPPct() < (cfg.executeHp or 25) then
+        -- Pain Spike first: instant shadow burst on a 30s cooldown whose damage
+        -- heals itself back after landing (Turtle tooltip) - so it is a kill
+        -- shot and nothing else, and belongs only here.
+        if cfg.usePainSpike and self:KnowsSpell("Pain Spike") and self:IsReady("Pain Spike") then
+            if self:Queue("Pain Spike", "finisher") then return end
+        end
         if cfg.useMindBlast and self:KnowsSpell("Mind Blast") and self:IsReady("Mind Blast") then
             if self:Queue("Mind Blast", "on cooldown") then return end
         end
@@ -731,16 +743,28 @@ function M:Rotate(cfg)
         end
     end
 
+    -- Damage-over-time upkeep, ahead of Mind Blast: the shadow priest's order
+    -- as played on Turtle - Shadow Word: Pain, Vampiric Embrace, then Mind
+    -- Blast, Mind Flay to fill. A DoT missing for the length of a Mind Blast
+    -- cast costs more ticks than the Blast gains.
+    if cfg.useShadowWordPain and self:KnowsSpell("Shadow Word: Pain") then
+        local r = self:ApplyDot("Shadow Word: Pain", "Spell_Shadow_ShadowWordPain", 3)
+        if r == "cast" or r == "wait" then return end
+    end
+    -- Vampiric Embrace: a one-minute debuff on the target that heals the party
+    -- for a share of the shadow damage dealt to it. Kept up like a DoT; it is
+    -- per caster, so DebuffMine applies. Off by default - it takes a debuff
+    -- slot and adds threat, both of which matter on a raid boss.
+    if cfg.useVampiricEmbrace and self:KnowsSpell("Vampiric Embrace") then
+        local r = self:ApplyDot("Vampiric Embrace", "Spell_Shadow_UnsummonBuilding", 3)
+        if r == "cast" or r == "wait" then return end
+    end
+
     -- Mind Blast on cooldown: the Shadow Weaving trigger and a strong nuke.
     if cfg.useMindBlast and self:KnowsSpell("Mind Blast") and self:IsReady("Mind Blast") then
         if self:Queue("Mind Blast", "on cooldown") then return end
     end
 
-    -- Damage-over-time upkeep.
-    if cfg.useShadowWordPain and self:KnowsSpell("Shadow Word: Pain") then
-        local r = self:ApplyDot("Shadow Word: Pain", "Spell_Shadow_ShadowWordPain", 3)
-        if r == "cast" or r == "wait" then return end
-    end
     if cfg.useDevouringPlague and self:KnowsSpell("Devouring Plague") then
         local r = self:ApplyDot("Devouring Plague", "Spell_Shadow_DevouringPlague", 3)
         if r == "cast" or r == "wait" then return end
