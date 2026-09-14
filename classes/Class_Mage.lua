@@ -201,7 +201,7 @@ function M:Wand()
         p.spell = "Shoot"; p.reason = "wanding"
         return true
     end
-    Aegis_SBR:StartRepeating("Shoot")
+    if Aegis_SBR.StartRepeating then Aegis_SBR:StartRepeating("Shoot") else CastSpellByName("Shoot") end
     -- Same reason as Queue below: this calls the primitive directly, so it must
     -- do its own bookkeeping for OnCastError's refusal trace to see it.
     Aegis_SBR:NoteSpellCast("Shoot")

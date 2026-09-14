@@ -301,6 +301,7 @@ M.strikeCmdAlias = {
     hs = "hs", holy = "hs",
     cs = "cs", crusader = "cs",
     auto = "auto", dps = "auto",
+    alternate = "alternate", alt = "alternate",
     tank = "tank", block = "tank",
 }
 
@@ -562,7 +563,18 @@ function M:NormalizeProfile(c)
     -- Which seal the healer keeps and judges. Wisdom is the default, but in a
     -- group somebody else may already be judging Wisdom onto the mob, and the
     -- healer's contribution is then a different judgement - Light, typically.
-    if type(c.healSeal) ~= "string" or c.healSeal == "" then c.healSeal = "Seal of Wisdom" end
+    -- Two seals for the healer: the one JUDGED onto the mob once per mob
+    -- (healJudgeSeal, "" = none) and the one KEPT UP on the healer while
+    -- swinging (healSeal, "" = none). Older profiles carried one seal and two
+    -- switches; they migrate once - the judge switch on makes the old seal the
+    -- judge seal, the keep switch off empties the keep seal - and the switches
+    -- are not read again.
+    if type(c.healSeal) ~= "string" then c.healSeal = "Seal of Wisdom" end
+    if c.healJudgeSeal == nil then
+        c.healJudgeSeal = (c.healManaJudge and c.healSeal ~= "" ) and c.healSeal or ""
+        if c.healManaSelf == false then c.healSeal = "" end
+    end
+    if type(c.healJudgeSeal) ~= "string" then c.healJudgeSeal = "" end
     if c.healManaJudge == nil then c.healManaJudge = false end
     -- Pre-load Holy Judgement during a lull. OFF by default: it is on the "adds
     -- casts" side, and a cast added to a healer's rotation is exactly the kind of
@@ -753,11 +765,16 @@ function M:CastStrike(name, cfg)
                 return true
             end
             CastSpellByName(ranked)
+            self.lastStrike = name
             return true
         end
     end
     if not self:Affordable(name) then return false end
-    return self:Pick(name, "strike")
+    if self:Pick(name, "strike") then
+        if not Aegis_SBR.deciding then self.lastStrike = name end
+        return true
+    end
+    return false
 end
 
 -- The single strike chosen for this shared-cooldown window. Gated on the two
@@ -767,7 +784,9 @@ function M:ResolveSharedCD(cfg)
     local hs = self:HSOn(cfg)
     local cs = self:CSOn(cfg)
     if hs and cs then
-        if (cfg.strikeStyle or "autodps") == "tankblock" then return self:ResolveTankBlock(cfg) end
+        local style = cfg.strikeStyle or "autodps"
+        if style == "tankblock" then return self:ResolveTankBlock(cfg) end
+        if style == "alternate" then return self:ResolveAlternate(cfg) end
         return self:ResolveAutoDPS(cfg)
     elseif hs then
         return "Holy Strike"
@@ -807,6 +826,15 @@ function M:ResolveAutoDPS(cfg)
     if zt  < ZEAL_RENEW then return "Crusader Strike" end
     if hmt < HM_RENEW  then return "Holy Strike"     end
     return "Holy Strike"                                 -- filler tops Holy Might, adds mana and heal
+end
+
+-- Fixed pattern, both strikes on: Holy Strike opens the fight for threat, then
+-- the two strictly alternate. No buff is read; the last strike that went out
+-- decides the next, and a fresh fight starts over on Holy Strike.
+function M:ResolveAlternate(cfg)
+    if not UnitAffectingCombat("player") then return "Holy Strike" end
+    if self.lastStrike == "Holy Strike" then return "Crusader Strike" end
+    return "Holy Strike"
 end
 
 -- Tank, both strikes on: keep the Crusader Strike block buff (Zealous Defense,
@@ -2290,12 +2318,16 @@ end
 -- This reverses an earlier reading that the seal should be kept up at all
 -- times because its uptime "was bad". Uptime while not swinging is not uptime
 -- that does anything.
+--
+-- Never cast over a judge seal that is up and waiting for its Judgement (see
+-- HealJudgePending): the swap to the judge seal was a global cooldown spent
+-- on purpose, and this would throw it away a press later.
 function M:HealSealUp(cfg)
-    if not cfg.healManaSelf then return false end
-    local seal = cfg.healSeal or "Seal of Wisdom"
-    if not self:KnowsSpell(seal) then return false end
+    local seal = cfg.healSeal or ""
+    if seal == "" or not self:KnowsSpell(seal) then return false end
     if self:HasBuff(seal) then return false end
     if not self:Swinging() then return false end
+    if self:HealJudgePending(cfg) then return false end
     if not self:Affordable(seal) then return false end
     return self:Pick(seal, "seal for the swings")
 end
@@ -2306,21 +2338,43 @@ function M:Swinging()
     return (PlayerFrame and PlayerFrame.inCombat) and true or false
 end
 
--- Stamp Judgement of Wisdom on the mob, so the whole group gets mana back. This
--- one really does need a target in melee range, and the seal on you to judge.
-function M:HealSeals(cfg)
-    if not cfg.healManaJudge then return false end
-    local seal = cfg.healSeal or "Seal of Wisdom"
-    if not self:KnowsSpell(seal) then return false end
-    if not (UnitExists("target") and not UnitIsDead("target") and UnitCanAttack("player", "target")) then return false end
-    if not self:InMeleeRange() then return false end
-    if not self:HasBuff(seal) then return false end
-    if cfg.healManaJudge and self:KnowsSpell("Judgement") and self:IsReady("Judgement")
-        and not self:DebuffEffectivelyUp(seal) then
-        if not self:Affordable("Judgement") then return false end
-        return self:Pick("Judgement", "judge the seal")
+-- The judge seal, once per mob, the way the retribution step (A) in
+-- HandleSeals does it: while the mob lacks the judgement, put the judge seal
+-- up if it is not, then judge it. A different seal from the one kept up, so a
+-- healer can judge Light onto the mob for the group and still swing with
+-- Wisdom for their own mana - the two were one setting before.
+--
+-- Needs an attackable target in melee range: Judgement reaches ten yards, and
+-- the seal swap is only worth starting where the judgement can follow it.
+function M:HealJudgeTarget()
+    return UnitExists("target") and not UnitIsDead("target") and UnitCanAttack("player", "target")
+        and self:InMeleeRange()
+end
+
+-- Is the judge seal on the healer, waiting for its Judgement? The keep seal
+-- must not be cast over it then.
+function M:HealJudgePending(cfg)
+    local seal = cfg.healJudgeSeal or ""
+    if seal == "" or not self:HasBuff(seal) then return false end
+    if not self:HealJudgeTarget() then return false end
+    return not self:DebuffEffectivelyUp(seal)
+end
+
+function M:HealJudge(cfg)
+    local seal = cfg.healJudgeSeal or ""
+    if seal == "" or not self:KnowsSpell(seal) then return false end
+    if not self:KnowsSpell("Judgement") then return false end
+    if not self:HealJudgeTarget() then return false end
+    if self:DebuffEffectivelyUp(seal) then return false end
+    if not self:HasBuff(seal) then
+        if not self:Affordable(seal) then return false end
+        return self:Pick(seal, "judge seal")
     end
-    return false
+    if self:IsReady("Judgement") and self:Affordable("Judgement")
+        and Aegis_SBR:SpellReaches("Judgement", "target") then
+        return self:Pick("Judgement", "judge the seal onto the mob")
+    end
+    return false   -- seal up, waiting for the judgement
 end
 
 -- Pre-load the Holy Judgement buff during a lull, so the next Holy Light casts
@@ -2332,7 +2386,7 @@ end
 -- simply casting the 2.5s Holy Light. Cast while nobody needs healing, the
 -- global cooldown was free anyway and the next emergency lands a second sooner.
 --
--- Often redundant, deliberately so: HealSeals above already casts Judgement when
+-- Often redundant, deliberately so: HealJudge above already casts Judgement when
 -- the group-mana judge is enabled and the debuff is missing, and that cast grants
 -- this buff for free. This step only earns its place when that one is switched
 -- off, or when the debuff is already stamped and the buff has since been spent.
@@ -2565,7 +2619,7 @@ function M:Rotate(cfg)
     --
     -- Reads only. The gate conditions are printed as their raw INPUTS (melee,
     -- mana, the switches) and never by calling HealStrikeEngine / HolyStrikeDue
-    -- / HealSeals, which cast when they return true.
+    -- / HealJudge, which cast when they return true.
     --
     -- The two ranks shown are picked against the RAW deficit, not against the
     -- padded one DoHeal uses (combat compensation, healing-reduction debuffs), so
@@ -2612,8 +2666,8 @@ function M:Rotate(cfg)
                 .. "/" .. (cfg.hsMinTargets or 1) .. "@" .. (cfg.hsMinHP or 100) .. "%"
                 .. " hsDue=" .. (self:HolyStrikeDue(cfg) and "Y" or "N")
                 .. " reload=" .. (cfg.healReloadCS and "on" or "off")
-                .. " seal=" .. (cfg.healManaSelf and "self" or "-")
-                .. "/" .. (cfg.healManaJudge and "judge" or "-")
+                .. " seal=" .. ((cfg.healSeal ~= "" and cfg.healSeal) or "-")
+                .. "/judge=" .. ((cfg.healJudgeSeal ~= "" and cfg.healJudgeSeal) or "-")
                 .. (cfg.healAggro and (" danger=" .. (u and (self:InDanger(u) and "Y" or "n") or "-")
                     .. "/" .. (u and self:AggroCount(u) or 0)) or "")
                 .. " hj=" .. (hlFast and "up" or "-")
@@ -2659,16 +2713,14 @@ function M:Rotate(cfg)
             if self:CastStrike("Holy Strike", cfg) then return end
         end
 
-        -- 2. Seal of Wisdom when it has run out. A self buff: no target, no
-        -- enemy, no melee range, one global cooldown - and it pays for every
-        -- heal after it. Measured in the same log: 17% of presses under 10%
-        -- mana, seven of them at zero.
-        if not emergency and self:HealSealUp(cfg) then return end
+        -- 2. The judge seal onto the mob, once per mob: seal up, judge, done.
+        -- Ahead of the keep seal so the swap is not undone a press later.
+        if not emergency and self:HealJudge(cfg) then return end
 
-        -- 3. Judgement of Wisdom, once, so the group gets mana back too. Once
-        -- per mob and then Holy Strike's hits keep it up, so it is cheap - but
-        -- it never came up at all from below the heal.
-        if not emergency and self:HealSeals(cfg) then return end
+        -- 3. The keep seal while swinging. A self buff: no target, no enemy,
+        -- one global cooldown - and it pays for every heal after it. Measured
+        -- in a healer's log: 17% of presses under 10% mana, seven at zero.
+        if not emergency and self:HealSealUp(cfg) then return end
     end
 
     if cfg.healMode and self:DoHeal(cfg) then return end
@@ -2967,7 +3019,7 @@ function M:Rotate(cfg)
         if self:Pick("Consecration", "AoE") then return end
     end
     -- 3. Seal upkeep and judgement (damage/tank mode only; heal mode runs its
-    -- own Seal of Wisdom upkeep via HealSeals above)
+    -- own two seals via HealJudge / HealSealUp above)
     if not cfg.healMode and self:HandleSeals(cfg) then return end
     -- 5. Repentance. On an immune target it is a damage cooldown; on everything
     -- else it is a crowd control worth spending only to stop a cast. Which one
@@ -3038,7 +3090,7 @@ function M:CmdStrike(alias)
     local cfg = Aegis_SBR:GetActiveProfile()
     if not cfg then msgOut("no profile active.", 1, 0.5, 0.3); return end
     local what = self.strikeCmdAlias[string.lower(alias or "")]
-    if not what then msgOut("usage: /sbr strike off|hs|cs|auto|tank", 1, 0.5, 0.3); return end
+    if not what then msgOut("usage: /sbr strike off|hs|cs|auto|tank|alternate", 1, 0.5, 0.3); return end
     cfg.spells = cfg.spells or {}
     if what == "off" then
         cfg.spells.holyStrike, cfg.spells.crusaderStrike = false, false
@@ -3050,6 +3102,8 @@ function M:CmdStrike(alias)
         cfg.spells.holyStrike, cfg.spells.crusaderStrike, cfg.strikeStyle = true, true, "autodps"
     elseif what == "tank" then
         cfg.spells.holyStrike, cfg.spells.crusaderStrike, cfg.strikeStyle = true, true, "tankblock"
+    elseif what == "alternate" then
+        cfg.spells.holyStrike, cfg.spells.crusaderStrike, cfg.strikeStyle = true, true, "alternate"
     end
     local both = cfg.spells.holyStrike and cfg.spells.crusaderStrike
     msgOut("strikes -> HS " .. (cfg.spells.holyStrike and "on" or "off")
