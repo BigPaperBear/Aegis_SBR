@@ -196,6 +196,10 @@ end
 function M:Wand()
     if self:Wanding() then return true end
     if not self:HasWand() then return false end
+    -- Starting the wand over a running channel clips it, the same way a direct
+    -- cast does. Stands down until the channel ends; the press falls through to
+    -- whatever the caller does next, which during a channel is nothing.
+    if self.channeling then return false end
     if Aegis_SBR.deciding then
         local p = Aegis_SBR.decidePlan
         p.spell = "Shoot"; p.reason = "wanding"
@@ -245,6 +249,17 @@ end
 -- An unreadable cost answers YES (see CanAfford), so a tooltip that failed to
 -- populate can never lock a step out.
 function M:Pick(name, reason)
+    -- A running channel takes only QUEUED sends. CastSpellByName over a channel
+    -- CLIPS it - the channel stops where it is and the new spell begins - so
+    -- every direct send stands down until it ends. Queue is unaffected: it hands
+    -- the press to the client's queue, which releases it AFTER the channel
+    -- rather than over the top of it. This is what lets Rotate carry on through
+    -- a channel at all; without it the fall-through would cancel the channel it
+    -- was meant to protect.
+    if self.channeling then
+        if self:Tracing() then self:Trace("hold " .. name .. " (channel)") end
+        return false
+    end
     -- Traced for the same reason as Queue: a press turned away here used to be
     -- indistinguishable in the log from a press that never got this far.
     if not Aegis_SBR:CanAfford(name) then
@@ -296,6 +311,14 @@ function M:Queue(name, reason)
     -- the queue was added for. Only the post-channel moment is carved out.
     local direct = self:Wanding() or not QueueSpellByName
         or (GetTime() - (self.chanEnd or 0)) < POST_CHANNEL_DIRECT
+    -- Never direct over a RUNNING channel - that clips it. This guard is load
+    -- bearing now rather than belt-and-braces: with presses queued through the
+    -- channel the next one starts within a fraction of a second of the last
+    -- ending, so chanEnd - the PREVIOUS channel's end - sits inside the
+    -- post-channel window while a NEW channel is already running. The window
+    -- alone would then send a clipping cast on exactly the presses this change
+    -- created. Wanding is caught by the same guard for the same reason.
+    if self.channeling and QueueSpellByName then direct = false end
     if direct then
         CastSpellByName(name)
     else
@@ -374,6 +397,10 @@ M.cureFail = {}
 -- on the group usually costs more than one missed cast, and unlike a heal there
 -- is no severity to weigh it against - it is there or it is not.
 function M:CureStep(cfg)
+    -- Ends in CastOnUnit, a direct cast, so it clips a running channel exactly
+    -- as M:Pick would. The one send path in this module that does not go
+    -- through Pick or Queue, which is why it carries its own copy of the guard.
+    if self.channeling then return false end
     if not cfg.useCure then return false end
     if not self:KnowsSpell("Remove Lesser Curse") then return false end
     if not self:IsReady("Remove Lesser Curse") then return false end
@@ -415,7 +442,24 @@ function M:Rotate(cfg)
     -- and for how long. Note the ceiling is 16s against channels of 3-5s, so it
     -- is a wedge-preventer, not a timing guard - a missed stop event still costs
     -- far more than the channel it was protecting.
-    if self.channeling and self.chanStart and (GetTime() - self.chanStart) < 16 then
+    --
+    -- The stall is for clients with NO queue. Nampower's queue exists to hold a
+    -- spell until what is already in flight finishes, and a channel is in
+    -- flight - so where it exists, the press is queued behind the channel
+    -- instead of being thrown away, and the client releases it at the instant
+    -- the channel ends. That instant is what spamming the ability itself hits
+    -- and what this rotation could not: standing every press down meant the
+    -- first cast could only come from a press AFTER the stop event, so every
+    -- channel cost the event's own lateness plus up to a full press interval.
+    -- Three earlier attempts at this report all tuned what happens after the
+    -- stop event and none of them removed the discarded press.
+    --
+    -- Only QUEUED sends may act while a channel runs: a direct CastSpellByName
+    -- clips the channel outright. M:Pick and M:Wand stand down for the duration
+    -- (see their guards), which leaves the queued nuke lines as the only steps
+    -- that can send. Same shape as the warlock's in-flight rule (v1.2.30).
+    if self.channeling and self.chanStart and (GetTime() - self.chanStart) < 16
+        and not QueueSpellByName then
         if self:Tracing() then
             self:Trace(string.format("STALL channel %.1fs", GetTime() - self.chanStart))
         end
