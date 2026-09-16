@@ -4,6 +4,45 @@ All notable changes to **Aegis: Single Button Rotation** (formerly **AutoRota**)
 
 ---
 
+## v1.2.31 — Mage: the press during a channel is queued, not thrown away
+
+### 🐛 Fixed — the gap between Arcane Missiles channels
+
+Spamming the ability beat spamming the macro. Reported four times; the three earlier
+attempts all tuned what happens *after* the channel stops, and the cause was what happened
+*during* it.
+
+Every press made while a channel ran hit a blanket stall at the top of the rotation and did
+nothing. Nothing was sent, so nothing was waiting when the channel ended. The first cast
+could only come from a press that arrived **after** the stop event, which cost the event's own
+lateness plus up to a full press interval, on every channel. Spamming Arcane Missiles directly
+pays neither: the client takes the press during the channel and releases it the instant the
+channel ends.
+
+The rotation now does the same. While a channel runs the press is **queued** behind it —
+which is what the queue is for, and what the Warlock has done behind a running cast or
+channel since v1.2.30. The stall remains for clients with no queue, where there is nothing to
+hold the press and a direct cast would clip the channel.
+
+Only queued sends may act while a channel runs; a direct `CastSpellByName` cancels the channel
+where it stands. Four send paths stand down for the duration:
+
+| Path | Guard |
+|---|---|
+| `M:Pick` | refuses while channeling (traced as `hold <spell> (channel)`) |
+| `M:Wand` | refuses while channeling |
+| `M:CureStep` | refuses while channeling — ends in a direct `CastOnUnit` |
+| `M:Queue` | never takes the direct branch while channeling |
+
+That last one is not precautionary. With presses queued through the channel, the next channel
+now begins a fraction of a second after the last one ends, so the previous channel's end sits
+inside the post-channel direct window while a **new** channel is already running — the window
+alone would have sent a clipping cast on exactly the presses this change created.
+
+Shields, Evocation and decursing are skipped during a channel, as they were before.
+
+---
+
 ## v1.2.30 — held, not queued
 
 ### 🔧 Warlock: a press behind a bare global cooldown is held, not queued

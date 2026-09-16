@@ -406,6 +406,16 @@ calculators block automated access.
     starved Auto Shot — the Hunter looked like it had stopped attacking (2026-08-18).
     Suppression is safe however badly the two sources disagree: worst case is a missed cast,
     never a loop. Anything on the "adds casts" side needs a play-test on that class first.
+  - **A guard that stands a press down is not free — it has to be measured against what the
+    player does by hand.** The mage's channel guard discarded every press for the length of an
+    Arcane Missiles channel, so the first cast could only come from a press AFTER the stop
+    event: the event's lateness plus a press interval, every channel. Spamming the ability
+    pays neither, which is exactly what was reported, four times. Three fixes tuned the window
+    AFTER the stop event and none of them removed the discarded press. Where a queue exists,
+    queue behind what is in flight (the warlock's v1.2.30 rule); stall only where there is
+    nothing to hold the press. And when a change makes casts chain back-to-back, re-check
+    every "time since the last one ended" window — the previous channel's end can now sit
+    inside the post-channel window while a NEW channel is running (v1.2.31).
   - `IsSpellInRange` **throws** for a name it cannot resolve — it does not answer `-1`. Every
     call needs a `pcall`, because a throw does not just close the gate, it aborts the rest of
     the press. Fixed v1.2.17 after a shaman respec left `KnowsSpell` answering "yes" for a
