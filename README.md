@@ -2,7 +2,7 @@
 
 **One button. Your whole rotation.**
 
-[![Discord](https://img.shields.io/badge/Discord-join%20us-5865F2?style=flat-square&logo=discord&logoColor=white)](https://discord.gg/hsgPTNkSX)
+[![Discord](https://img.shields.io/badge/Discord-join%20us-5865F2?style=flat-square&logo=discord&logoColor=white)](https://discord.gg/Hr66t25vE7)
 [![RavenCraft](https://img.shields.io/badge/RavenCraft-1.18.1-1e1e1e?style=flat-square&labelColor=555)](https://ravencraft.io/)
 [![CapyCraft](https://img.shields.io/badge/CapyCraft-1.18.1-8B5A2B?style=flat-square&labelColor=555)](https://capycraft.io/)
 [![Octo WoW](https://img.shields.io/badge/Octo%20WoW-1.18.1-8A2BE2?style=flat-square&labelColor=555)](https://octowow.st/)
@@ -23,7 +23,7 @@ single best ability for that instant. No macro spaghetti, no clipping the global
 > **Lua 5.0**. Not Classic. Not retail. Real vanilla, with 1.18.1's custom class changes
 > baked in.
 
-**[💬 Join the Discord](https://discord.gg/hsgPTNkSX)** for help, bug reports, and rotation
+**[💬 Join the Discord](https://discord.gg/Hr66t25vE7)** for help, bug reports, and rotation
 feedback.
 
 > ⚠️ **Active beta.** Rotation logic and general functionality can still have rough edges.
@@ -589,7 +589,7 @@ and the reasoning behind each rule.
 1. Check the **version** — it's on the config window header and in the `.toc`. Quote it.
 2. Run **`/sbr debug`** (live buff/debuff names) and **`/sbr trace`** (per-press decisions).
    Between them, most "why won't it cast X" questions answer themselves.
-3. Tell us on **[Discord](https://discord.gg/hsgPTNkSX)** or open an
+3. Tell us on **[Discord](https://discord.gg/Hr66t25vE7)** or open an
    [issue](https://github.com/Torchlite-bit/Aegis_SBR/issues). Screenshots help enormously,
    especially for anything layout-related.
 
@@ -616,7 +616,7 @@ attacks instead and Aegis stays out of the way.)
 
 ## Contributing
 
-PRs welcome — come say hi on **[Discord](https://discord.gg/hsgPTNkSX)** first if you're
+PRs welcome — come say hi on **[Discord](https://discord.gg/Hr66t25vE7)** first if you're
 planning something big.
 
 Four requests:
@@ -644,7 +644,7 @@ MIT — see [LICENSE](LICENSE).
 
 <div align="center">
 
-**[💬 Discord](https://discord.gg/hsgPTNkSX)** · **[📜 Changelog](CHANGELOG.md)** · **[🐛 Issues](https://github.com/Torchlite-bit/Aegis_SBR/issues)**
+**[💬 Discord](https://discord.gg/Hr66t25vE7)** · **[📜 Changelog](CHANGELOG.md)** · **[🐛 Issues](https://github.com/Torchlite-bit/Aegis_SBR/issues)**
 
 *Aegis: Single Button Rotation is part of the Aegis addon series. One key. Go fight something.* ⚔️
 
