@@ -63,6 +63,8 @@ function M:BuildBody(ui, parent)
         slider = { key = "dotStopHp", min = 0, max = 50, step = 5, suffix = "%", onChange = set("dotStopHp") } }
     self.dotStopCorrRow = L:Row{ key = "dotStopKeepCorruption", label = "Keep Corruption up anyway", spell = "Corruption",
         onToggle = set("dotStopKeepCorruption") }
+    self.immoStopRow = L:Row{ label = "Stop Immolate below",
+        slider = { key = "immoStopHp", min = 0, max = 60, step = 5, suffix = "%", onChange = set("immolateStopHp") } }
 
     L:Header("Survival")
     self.drainRow = L:Row{ key = "drainLifeSustain", label = "Drain Life when low", spell = "Drain Life", onToggle = set("drainLifeSustain"),
@@ -107,6 +109,7 @@ function M:BuildBody(ui, parent)
     ui:Tip(self.shardRow.cb, "Stop early to keep shards", "Once you hold at least this many shards, Drain Soul stops finishing targets so the filler (or Shadowburn) takes over instead.")
     ui:Tip(self.shardRow.slider, "Shard target", "Drain Soul keeps finishing targets while you hold fewer shards than this.")
     ui:Tip(self.dotStopRow.slider, "Stop new DoTs below", "Below this target health, no damage-over-time effect is applied or refreshed any more - the press goes to your filler instead.", "A fresh DoT never earns its mana back on a mob about to die: Siphon Life needs most of its 30s to break even and Curse of Agony's damage comes at the end. Set to 0 to switch this off. DoTs already ticking are never cancelled.")
+    ui:Tip(self.immoStopRow.slider, "Stop Immolate below", "Below this target health Immolate is neither applied nor topped up - its two second cast is not repaid on a dying mob. Separate from the line above, so the instant DoTs can keep going longer. 0 = off.")
     ui:Tip(self.dotStopCorrRow.cb, "Keep Corruption up anyway", "Exempt Corruption from the stop above, so it alone is still refreshed while the target is nearly dead.", "Corruption is the shortest and most mana-efficient of the DoTs, which is why it is the one worth refreshing when nothing else is.")
     ui:Tip(self.drainRow.cb, "Drain Life when low", "Self-heal channel when your health dips below the value - the drain-tank safety net.")
     ui:Tip(self.funnelRow.cb, "Health Funnel pet", "Top the pet up when it drops, as long as your own health is safe (it transfers yours to the pet).")
@@ -235,6 +238,9 @@ function M:RefreshBody(ui, buf)
     self.dotStopRow.slider:SetValue(buf.dotStopHp or 0)
     self.dotStopRow.slider.valText:SetText((buf.dotStopHp or 0) .. "%")
     ui:SliderEnable(self.dotStopRow.slider, true)
+    self.immoStopRow.slider:SetValue(buf.immolateStopHp or 0)
+    self.immoStopRow.slider.valText:SetText((buf.immolateStopHp or 0) .. "%")
+    ui:SliderEnable(self.immoStopRow.slider, buf.useImmolate and true or false)
     ui:BindCheck(self.dotStopCorrRow, buf.dotStopKeepCorruption)
     if (buf.dotStopHp or 0) <= 0 then
         self.dotStopCorrRow.cb:Disable()

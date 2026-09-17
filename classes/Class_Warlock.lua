@@ -47,7 +47,7 @@ local M = Aegis_SBR:NewClassModule("WARLOCK")
 M.uiTitle = "Warlock"
 -- Rotate runs under Aegis_SBR:Preview without casting (see Pick/Later).
 M.previewReady = true
-M.uiHeight = 940
+M.uiHeight = 966
 M.meleeAutoAttack = false   -- caster, no white melee swing
 
 -- Talent that turns on the free instant Shadow Bolt proc (Shadow Trance).
@@ -329,7 +329,7 @@ wlCastEventFrame:SetScript("OnEvent", function()
             if not (tname and guid and string.find(arg1, tname, 1, true)) then return end
             local function mark(name)
                 if string.find(arg1, name, 1, true) then
-                    M.dotImmune[guid .. "|" .. name] = true
+                    M.dotImmune[guid .. "|" .. name] = GetTime()
                     M.dotThrottle[name] = nil
                     M.dotPending[name] = nil
                     return true
@@ -604,6 +604,9 @@ function M:NormalizeProfile(c)
     -- 20, so a profile saved before this existed keeps its old behaviour until
     -- the slider is moved; fresh profiles get the efficiency straight away.
     if c.dotStopHp == nil then c.dotStopHp = 0 end
+    -- Immolate's own stop line: a two second cast that a dying mob does not
+    -- repay, so it can stop earlier than the instant DoTs. 0 = off.
+    if c.immolateStopHp == nil then c.immolateStopHp = 0 end
     if c.dotStopKeepCorruption == nil then c.dotStopKeepCorruption = true end
     return c
 end
@@ -729,6 +732,26 @@ function M:BusyFor(name, busy)
     return GCD
 end
 
+-- Why a channel cannot be started right now, or nil. One answer for the two
+-- places that ask: Queue, which refuses the send, and WandAllowed, which
+-- must not protect a channel that is not going to happen - a log showed the
+-- wand refused on every press for an affordable Drain Life that was out of
+-- range, so the press did nothing at all.
+--
+--   * moving breaks a channel outright, so starting one is a global cooldown
+--     spent on nothing;
+--   * a channel aimed at the target that cannot reach it: Drain Life reaches
+--     twenty yards where the DoTs reach thirty, so at the edge of range every
+--     press sent a channel the client refused;
+--   * a target that takes no life drain (see LifeDrainImmune).
+function M:ChannelRefusal(name)
+    if not M.CHANNELED[name] then return nil end
+    if Aegis_SBR:Moving() then return "moving" end
+    if M.TARGET_CHANNELS[name] and not Aegis_SBR:SpellReaches(name, "target") then return "out of range" end
+    if name == "Drain Life" and self:LifeDrainImmune() then return "target takes no life drain" end
+    return nil
+end
+
 function M:Queue(name, reason, busy)
     if not self:KnowsSpell(name) then return false end
     -- Moving: refuse every channel, and let the caller fall through to whatever
@@ -739,21 +762,9 @@ function M:Queue(name, reason, busy)
     -- instant Shadow Bolt off a Nightfall proc, and channels. Only the last of
     -- those cares where you are standing, so moving costs nothing but the
     -- channel, and standing still runs the complete rotation.
-    if M.CHANNELED[name] and Aegis_SBR:Moving() then
-        if self:Tracing() then self:Trace("moving, no " .. name) end
-        return false
-    end
-    -- A channel aimed at the target that cannot reach it. Drain Life reaches
-    -- twenty yards where the DoTs reach thirty, so at the edge of range every
-    -- press sent a channel the client refused - reported as spamming out of
-    -- range while everything else was in range. Refused here so the caller
-    -- falls through to what it would have done otherwise: the wand.
-    if M.TARGET_CHANNELS[name] and not Aegis_SBR:SpellReaches(name, "target") then
-        if self:Tracing() then self:Trace("out of range, no " .. name) end
-        return false
-    end
-    if name == "Drain Life" and self:LifeDrainImmune() then
-        if self:Tracing() then self:Trace("target takes no life drain, no Drain Life") end
+    local why = self:ChannelRefusal(name)
+    if why then
+        if self:Tracing() then self:Trace(why .. ", no " .. name) end
         return false
     end
     if Aegis_SBR.deciding then
@@ -1482,10 +1493,23 @@ M.dotThrottle = {}
 -- whole fight - reported as Immolate being spammed on fire-immune mobs.
 M.dotImmune = {}
 
+-- Kept for a while, not for the fight: some immunities are timed - a boss
+-- immune to spells for a phase - and a DoT learned immune then was never
+-- tried again, the rotation standing still after the phase ended. A permanent
+-- immunity costs one re-learning cast per window, which is cheap.
+local IMMUNE_TTL = 20.0
+
 function M:DotImmune(spellName)
     local _, guid = UnitExists("target")
     if not guid then return false end
-    return self.dotImmune[guid .. "|" .. spellName] and true or false
+    local at = self.dotImmune[guid .. "|" .. spellName]
+    if not at then return false end
+    if at == true then return true end
+    if GetTime() - at > IMMUNE_TTL then
+        self.dotImmune[guid .. "|" .. spellName] = nil
+        return false
+    end
+    return true
 end
 
 -- Confirmed casts per "<targetId>|<spell>" not yet read back (see the CAST
@@ -1506,7 +1530,7 @@ function M:NoteDotUnseen(spellName, id)
     local key = tostring(id) .. "|" .. spellName
     if (self.dotLanded[key] or 0) < 2 then return false end
     local _, guid = UnitExists("target")
-    if guid then self.dotImmune[guid .. "|" .. spellName] = true end
+    if guid then self.dotImmune[guid .. "|" .. spellName] = GetTime() end
     self.dotLanded[key] = nil
     if self:Tracing() then
         self:Trace(spellName .. ": two casts confirmed, never seen on the target - immune for this fight")
@@ -1731,6 +1755,7 @@ function M:WandAllowed()
     if f == "Dark Harvest" then f = cfg.dhGapFiller end
 
     if not (f and M.CHANNELED[f] and self:KnowsSpell(f)) then return true end
+    if self:ChannelRefusal(f) then return true end
     return not Aegis_SBR:CanAfford(f)
 end
 
@@ -1837,6 +1862,17 @@ end
 -- mana is there at the pull. The HP floor from the in-combat tap applies; the
 -- combat mana slider does not, this has its own. Nothing else is done here:
 -- with a friendly target, or in combat, the press stays idle as before.
+-- Whether the core should leave the target alone this press: the idle tap
+-- wants a press with no target, and auto-acquire would hand it a mob and a
+-- DoT on it instead - reported as pulling while tapping up between fights.
+function M:HoldAcquire(cfg)
+    if not cfg.lifeTapIdle then return false end
+    if UnitAffectingCombat("player") then return false end
+    if not self:KnowsSpell("Life Tap") then return false end
+    if self:ManaPct() >= (cfg.lifeTapIdleMana or 100) then return false end
+    return self:PlayerHPPct() > (cfg.lifeTapHpMin or 40)
+end
+
 function M:Prebuff(cfg)
     if not cfg.lifeTapIdle then return false end
     if UnitExists("target") or UnitAffectingCombat("player") then return false end
@@ -2133,9 +2169,15 @@ function M:Rotate(cfg)
     -- filler, it is the reason the warlock is still alive, and holding it for a
     -- DoT refresh would be the wrong trade. Half the configured threshold is
     -- where it stops waiting for anything.
+    --
+    -- And never held for a DoT the low-mana valve below is about to refuse:
+    -- with mana under the wand floor the ladder does not run, so waiting for
+    -- Corruption meant waiting forever - a log showed a warlock at 29% health
+    -- and 25% mana wanding for a minute with Drain Life held on every press.
     if cfg.drainLifeSustain and self:KnowsSpell("Drain Life") and hp < (cfg.drainLifeHp or 35) then
         local urgent = hp < (cfg.drainLifeHp or 35) / 2
-        if urgent or self:DotsCoverChannel("Drain Life", cfg) then
+        local valve = self:ManaPct() < (cfg.wandManaFloor or 15)
+        if urgent or valve or self:DotsCoverChannel("Drain Life", cfg) then
             if self:Queue("Drain Life", "filler, self healing") then return end
         end
     end
@@ -2232,7 +2274,9 @@ function M:Rotate(cfg)
     --  5. Corruption. Instant and the best damage-per-mana of the set, so it
     --     loses the least by being applied last.
     local order = {}
-    if cfg.useImmolate then table.insert(order, { "Immolate", self.dotTex["Immolate"], 3 }) end
+    if cfg.useImmolate and not (cfg.immolateStopHp and cfg.immolateStopHp > 0 and thp < cfg.immolateStopHp) then
+        table.insert(order, { "Immolate", self.dotTex["Immolate"], 3 })
+    end
     if cfg.curse ~= "" then
         local tex = self:CurseTex(cfg.curse)
         -- Exact upkeep when the curse is detectable (known icon, or SuperWoW
