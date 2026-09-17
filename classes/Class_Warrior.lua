@@ -29,7 +29,7 @@ local M = Aegis_SBR:NewClassModule("WARRIOR")
 M.uiTitle = "Warrior"
 -- Rotate runs under Aegis_SBR:Preview without casting (see Pick/Later).
 M.previewReady = true
-M.uiHeight = 764
+M.uiHeight = 830
 
 -- Chat output is shared in the core; this shim keeps call sites unchanged.
 local function msgOut(text, r, g, b) Aegis_SBR:Msg(text, r, g, b) end
@@ -79,6 +79,7 @@ M.opWindow = OVERPOWER_WINDOW
 local SLAM_CAST_BASE = 2.5
 local SLAM_CAST_PER_RANK = 0.25
 local TALENT_IMP_SLAM = "Improved Slam"
+local TALENT_IMP_EXECUTE = "Improved Execute"
 -- How long the Revenge fallback waits between attempts while the combat log
 -- has not answered even once. Matched to Revenge's own cooldown, so the
 -- fallback can never cost more than one press per cooldown.
@@ -92,6 +93,22 @@ local DUMP_THROTTLE = 0.3
 -- Refresh Battle Shout when it is missing or has under this many seconds left.
 -- It lasts ~2 min, so this refreshes it roughly once per two minutes.
 local BSHOUT_RENEW = 30
+
+-- Fallback radius for the auto-AoE enemy count, used only if the Whirlwind
+-- tooltip cannot be read. Matches the paladin's Consecration fallback.
+local AOE_RADIUS = 8
+
+-- How long auto AoE holds before flipping back to single target once the pack
+-- drops below the threshold. Nameplates vanish and reappear (a mob steps out
+-- of range, interior walls, the fixed cap), so the mode must not thrash on a
+-- flicker; the hold is per threshold tick, not cumulative.
+local AOE_EXIT_HOLD = 1.0
+
+-- How often the CC scan may re-read the pack's auras. Each press walking the
+-- nameplates AND reading every enemy's aura list is the same shape of cost the
+-- enemy counter article warns about; a fight's CC state changes on the order
+-- of seconds, not tenths.
+local CC_SCAN_TTL = 0.5
 
 -- Stance key -> spell name. Used by the home-stance setting and switching.
 M.STANCES = {
@@ -113,7 +130,7 @@ local RAGE = {
     ["Shield Slam"]   = 20,
     ["Whirlwind"]     = 25,
     ["Slam"]          = 15,
-    ["Execute"]       = 10,   -- 15 base, but consumes all extra rage
+    ["Execute"]       = 15,   -- untalented client floor: refuses below 15 despite consuming all extra rage (Improved Execute lowers it - see ExecuteCost)
     ["Overpower"]     = 5,
     ["Revenge"]       = 5,
     ["Sunder Armor"]  = 12,   -- 15 base, often reduced
@@ -143,10 +160,7 @@ local STANCE_REQ = {
     ["Recklessness"]  = { "Berserker Stance" },
     ["Berserker Rage"]= { "Berserker Stance" },
     ["Shield Block"]  = { "Defensive Stance" },
-    -- Was missing, and a missing entry reads as "any stance": in Defensive with
-    -- AoE mode on, Sweeping Strikes was offered on every press and refused on
-    -- every press. Battle Stance only, per the client tooltip.
-    ["Sweeping Strikes"] = { "Battle Stance" },
+    ["Sweeping Strikes"]= { "Battle Stance" },
     -- Bloodthirst, Shield Slam, Slam, Sunder Armor, Heroic Strike, Cleave,
     -- Death Wish, Bloodrage: usable in any stance (Shield Slam needs a shield).
 }
@@ -187,6 +201,7 @@ M.templates = {
         stanceDance = false, homeStance = "berserker",
         useSunder = false, sunderStacks = 5, useThunderClap = false,
         aoeMode = false, useSweeping = false, useCleave = true,
+        aoeAuto = false, aoeThreshold = 2, aoeCc = true,
         useHeroicStrike = true, dumpRage = 60, wwExcess = 60,
         popCDs = false, autoCDElite = false,
         useDeathWish = false, useRecklessness = false, useBerserkerRage = false,
@@ -200,6 +215,7 @@ M.templates = {
         stanceDance = true, homeStance = "berserker",
         useSunder = false, sunderStacks = 5, useThunderClap = false,
         aoeMode = false, useSweeping = false, useCleave = true,
+        aoeAuto = false, aoeThreshold = 2, aoeCc = true,
         useHeroicStrike = true, dumpRage = 50, wwExcess = 50,
         popCDs = false, autoCDElite = true,
         useDeathWish = true, useRecklessness = true, useBerserkerRage = true,
@@ -213,6 +229,7 @@ M.templates = {
         stanceDance = true, homeStance = "berserker",
         useSunder = false, sunderStacks = 5, useThunderClap = false,
         aoeMode = false, useSweeping = true, useCleave = true,
+        aoeAuto = false, aoeThreshold = 2, aoeCc = true,
         useHeroicStrike = true, dumpRage = 50, wwExcess = 55,
         popCDs = false, autoCDElite = true,
         useDeathWish = false, useRecklessness = true, useBerserkerRage = true,
@@ -226,6 +243,7 @@ M.templates = {
         stanceDance = false, homeStance = "defensive",
         useSunder = true, sunderStacks = 5, useThunderClap = false,
         aoeMode = false, useSweeping = false, useCleave = true,
+        aoeAuto = false, aoeThreshold = 2, aoeCc = true,
         useHeroicStrike = true, dumpRage = 50, wwExcess = 70,
         popCDs = false, autoCDElite = false,
         useDeathWish = false, useRecklessness = false, useBerserkerRage = false,
@@ -261,6 +279,20 @@ function M:NormalizeProfile(c)
         -- other talent-gated extra here. KnowsSpell keeps it inert until the
         -- point is actually spent.
         useConcussionBlow = false,
+        -- Auto AoE: decide the AoE switch from the drawn enemy count instead of
+        -- the manual toggle. Off by default, because it depends on nameplates
+        -- being drawn - a real measurement where that works and no measurement
+        -- where it does not, and a default that quietly needs a client setting
+        -- is a trap (same reasoning as the paladin's consecMinTargets).
+        aoeAuto = false,
+        -- Pack size that flips auto AoE on. Minimum 2: with one enemy the
+        -- single-target priority list is always better, and it avoids the
+        -- on/off churn a threshold of 1 would cause around every pull.
+        aoeThreshold = 2,
+        -- Stand AoE down while a damage-breakable control (Polymorph, Freeze,
+        -- Sap) is on any enemy in the pack. On by default: breaking CC is a
+        -- group wipe, and the only cost of a false positive is a missed cast.
+        aoeCc = true,
     }
     for k, v in pairs(b) do
         if c[k] == nil then c[k] = v end
@@ -382,13 +414,16 @@ function M:OverpowerLearnTick()
     -- the cast. Closing the window on that answer threw it away whenever the
     -- cast was refused - a stance edge, latency - and Overpower was skipped
     -- silently. The window is left open until the client has answered instead:
-    -- refused, and the next press retries; no refusal within half a second, and
-    -- it counts as spent.
+    -- refused, and the next press retries; accepted, and the cooldown starting
+    -- is the confirmation (a refused cast starts none). Neither within half a
+    -- second is NOT an answer - a refusal can arrive late or be blamed on a
+    -- spell sent after this one - and silence must not close the gate, so the
+    -- window is kept until the proc's own expiry ends it.
     if self.overpowerAttemptAt and (GetTime() - self.overpowerAttemptAt) > 0.5 then
         if Aegis_SBR.SpellRefusedAnySince
             and Aegis_SBR:SpellRefusedAnySince("Overpower", self.overpowerAttemptAt) then
             if self:Tracing() then self:Trace("overpower refused, window stays open") end
-        else
+        elseif not self:IsReady("Overpower") then
             self.overpowerExpiry = 0
         end
         self.overpowerAttemptAt = nil
@@ -414,10 +449,43 @@ function M:OverpowerLearnTick()
     end
 end
 
+-- Resolve a Revenge attempt the same way as an Overpower one, and for the
+-- same reason: Pick answers "known", not "accepted", so an accepted cast is
+-- only told apart by the cooldown it starts. A refusal keeps the window open
+-- for the next press, and an unattributed outcome is not an answer and must
+-- not close the gate.
+function M:RevengeResolveTick()
+    if not self.revengeAttemptAt then return end
+    if GetTime() - self.revengeAttemptAt <= 0.5 then return end
+    if Aegis_SBR.SpellRefusedAnySince
+        and Aegis_SBR:SpellRefusedAnySince("Revenge", self.revengeAttemptAt) then
+        if self:Tracing() then self:Trace("revenge refused, window stays open") end
+    elseif not self:IsReady("Revenge") then
+        self.revengeExpiry = 0
+    end
+    self.revengeAttemptAt = nil
+end
+
 function M:SlamCastTime()
     local t = SLAM_CAST_BASE - SLAM_CAST_PER_RANK * self:TalentRank(TALENT_IMP_SLAM)
     if t < 0.5 then t = 0.5 end
     return t
+end
+
+-- Execute's minimum rage with the talent folded in.
+--
+-- 15 is the client's floor for the untalented spell. Improved Execute (Fury,
+-- 2 ranks) lowers it by 2, then 5 - the vanilla values stand until a server
+-- rebalance is confirmed. The talent read is the same one SlamCastTime uses
+-- for Improved Slam; a wrong rank costs at most one refused cast.
+--
+-- The full rage bar is still consumed either way - the talent only moves the
+-- minimum, which is exactly what the gate checks.
+function M:ExecuteCost()
+    local rank = self:TalentRank(TALENT_IMP_EXECUTE)
+    if rank == 2 then return RAGE["Execute"] - 5 end
+    if rank == 1 then return RAGE["Execute"] - 2 end
+    return RAGE["Execute"]
 end
 
 -- Is a Slam cast still running?
@@ -499,7 +567,23 @@ end
 -- every press, and an unknown swing timer lets Slam through by design, so this
 -- gate had never once closed. The paladin, which asks self:, was right all
 -- along; this was the difference between the two.
+--
+-- There used to be a post-Charge hold: wait for the first white swing to land
+-- before letting Slam through. It is gone. The swing latch proved unreliable
+-- on this client - the event that should have released the hold often never
+-- arrived - and the hold stood Slam down exactly in the opener the player
+-- wanted it in. The risk of a Slam clipping the very first swing is accepted
+-- by design now; an unknown timer never stands the cast down.
 function M:SlamFitsBeforeSwing()
+    -- After a disarm restart, hold Slam for one weapon cycle so the first
+    -- swing lands before Slam delays it. Time-bounded: if the swing latch
+    -- never fires, the hold expires and Slam is allowed through (same as
+    -- the accepted risk everywhere else).
+    if self.lastDisarmRestart then
+        local elapsed = GetTime() - self.lastDisarmRestart
+        if elapsed < (self.swingSpeed or 3.0) + 0.5 then return false end
+        self.lastDisarmRestart = nil
+    end
     local left = self:SwingTimeLeft()
     if not left then return true end
     return left >= self:SlamCastTime()
@@ -604,6 +688,99 @@ function M:TargetIsBleedImmune()
 end
 
 -- ============================================================
+-- CC-aware AoE decision
+--
+-- Two layers, both built on the drawn-enemy count the core enumerates.
+--
+-- AUTO mode decides the aoe flag itself: count >= threshold enters, count below
+-- the threshold exits after a short hold so a flickering nameplate does not
+-- reroute the rotation every press. A count that cannot be taken (no
+-- nameplates drawn) must keep the manual answer - nil is not zero, and a
+-- "cannot tell" that read as an empty pack would silently stand the rotation
+-- down in single target forever.
+--
+-- The CC layer stands the final flag down WHILE a control effect that breaks on
+-- damage is on any enemy the scan can see. Polymorph is the familiar one;
+-- OctoWow's extra forms (Rodent, Draenei Homunculus, ...) keep the name family,
+-- which is why the match is a PREFIX - an exact-name list would go stale the
+-- day the server adds one more model. Freeze (Freezing Trap - damage breaks the
+-- freeze; Frost Nova's ROOT does not and is deliberately absent) and Sap ride
+-- along. Fear is absent too: damage does not cancel fear on this client, so a
+-- feared mob is not a reason to stop.
+--
+-- The scan reads the target through the vanilla API (UnitDebuff) and the rest
+-- of the pack through ClassicAPI (UnitAuraNames, capability-gated). A unit that
+-- vanishes mid-scan, or a pack a source cannot read, answers "cannot tell" -
+-- which, per the rule that detection without an answer never closes a gate,
+-- does NOT stand anything down. The no-ClassicAPI player gets exactly today's
+-- behaviour, plus the target check the vanilla API can always do.
+-- ============================================================
+local CC_BREAK_CAP = 16          -- debuff slots per unit to read (1.12 target cap)
+local CC_BREAK_PREFIX = { "polymorph", "freeze", "sap" }
+
+-- name -> the blocking CC name when the debuff breaks on damage, else nil.
+function M:UnitHasBreakableCc(name)
+    if not name or name == "" then return nil end
+    local low = string.lower(name)
+    for i = 1, table.getn(CC_BREAK_PREFIX) do
+        if string.find(low, CC_BREAK_PREFIX[i], 1, true) then return low end
+    end
+    return nil
+end
+
+-- The living enemy set within the AoE radius, for the CC scan.
+function M:AoEPackUnits()
+    local radius = Aegis_SBR:SpellRadius("Whirlwind") or AOE_RADIUS
+    local list = Aegis_SBR:EnemiesNearCached(radius)
+    if not list then list = Aegis_SBR:EnemiesNear(radius) end
+    return list
+end
+
+-- true when a damage-breakable control is on any readable enemy, false when
+-- every readable enemy is clear, nil when the pack could not be scanned at all
+-- (no ClassicAPI). nil never stands the flag down - see the block comment above.
+--
+-- Cached for CC_SCAN_TTL: each check walks the nameplates and reads every
+-- enemy's harmful list, and a scan once per half second per target is enough.
+function M:PackHasBreakableCc()
+    local now = GetTime()
+    local c = self.packCcCheck
+    if c and (now - c.t) < CC_SCAN_TTL then return c.hit end
+    local hit = self:ScanPackForCc()
+    self.packCcCheck = { hit = hit, t = now }
+    return hit
+end
+
+function M:ScanPackForCc()
+    -- Target first: the one unit the vanilla API can read on any client.
+    if UnitExists("target") then
+        for i = 1, CC_BREAK_CAP do
+            local name = UnitDebuff("target", i)
+            if not name then break end
+            local hit = self:UnitHasBreakableCc(name)
+            if hit then return hit end
+        end
+    end
+
+    -- The rest of the pack needs ClassicAPI. Without it the scan has no answer
+    -- for the units it cannot see - return nil, which must read as "do not act".
+    if not Aegis_SBR:Capability("auras") then return nil end
+    local list = self:AoEPackUnits()
+    if not list then return nil end
+    for i = 1, table.getn(list) do
+        local u = list[i]
+        if not UnitExists(u) then return nil end -- vanishing mob, whole read void
+        local names = Aegis_SBR:UnitAuraNames(u)
+        if not names then return nil end         -- this enemy cannot be read
+        for j = 1, table.getn(names) do
+            local hit = self:UnitHasBreakableCc(names[j])
+            if hit then return hit end
+        end
+    end
+    return false
+end
+
+-- ============================================================
 -- Rotation
 -- ============================================================
 function M:Rotate(cfg)
@@ -612,17 +789,82 @@ function M:Rotate(cfg)
     local hp     = self:TargetHPPct()
     local cls    = UnitClassification("target")
     local isElite = (cls == "worldboss" or cls == "elite" or cls == "rareelite")
-    local aoe    = Aegis_SBR:AoeMode(cfg)
+
+    -- The AoE switch. `aoeMode` stays the manual line for the auto-off player,
+    -- and the toggle STILL wins when pulled. With auto on, the manual line is
+    -- the `aoeOverride` three-state: on/off (both forced, the /sbr aoe cycle)
+    -- or nil (idle, let the count decide). The state writes are deferred
+    -- through Later so a preview never mutates the real coefficients.
+    -- A press mode (/sbr run single|aoe) is the player's answer for THIS
+    -- press and outranks both the toggle and the auto count.
+    local pressed  = Aegis_SBR:PressModeHeld()
+    local aoe      = Aegis_SBR:AoeMode(cfg)
+    local aoeCount = nil   -- enemy count behind an auto decision (trace)
+    local ccState  = "off" -- PackHasBreakableCc result (trace)
+    if not pressed and not cfg.aoeMode and cfg.aoeAuto then
+        if cfg.aoeOverride == true then
+            -- /sbr aoe cycled here: forced on, the count never sees this press.
+            aoe = true
+        elseif cfg.aoeOverride == false then
+            -- ... and here: forced off, stands even against a full pack.
+            aoe = false
+        else
+            -- No override held: the count decides, and nil is "cannot tell",
+            -- not zero: the switch changes only on a real count, otherwise the
+            -- idle state stands.
+            local radius = Aegis_SBR:SpellRadius("Whirlwind") or AOE_RADIUS
+            local n = Aegis_SBR:CountEnemiesNear(radius)
+            if n ~= nil then
+                aoeCount = n
+                local want = cfg.aoeThreshold or 2
+                local since = self.aoeBelowSince
+                if n >= want then
+                    aoe = true
+                    if since then self:Later(function() self.aoeBelowSince = nil end) end
+                elseif n <= 1 then
+                    -- one enemy, or none within radius, is single target by
+                    -- definition and flips back immediately.
+                    aoe = false
+                    if since then self:Later(function() self.aoeBelowSince = nil end) end
+                else
+                    -- below the threshold but not alone (only reachable with the
+                    -- threshold above 2): hold briefly so a flickering nameplate
+                    -- does not re-route the rotation on every press.
+                    if not since then
+                        local t = now
+                        self:Later(function() self.aoeBelowSince = now end)
+                        since = t
+                    end
+                    aoe = (now - since) < AOE_EXIT_HOLD
+                end
+            end
+        end
+    end
+
+    -- Breakable CC stands the WHOLE switch down, manual included: a group pull
+    -- sitting by a polymorphed sheep is exactly the case the manual toggle
+    -- cannot see from here.
+    if aoe and cfg.aoeCc then
+        local hit = self:PackHasBreakableCc()
+        if hit == nil then       ccState = "unknown"
+        elseif hit == false then ccState = "none"
+        else                     ccState = hit; aoe = false end
+    end
+
     local inCombat = UnitAffectingCombat("player")
 
     local inExecute = cfg.useExecute and hp <= 20 and self:KnowsSpell("Execute")
-        and rage >= RAGE["Execute"] and not self:InStance("Defensive Stance")
+        and rage >= self:ExecuteCost() and not self:InStance("Defensive Stance")
 
     if self:Tracing() then
         self:Trace("rage=" .. rage
             .. " stance=" .. (self:CurrentStanceName() or "-")
             .. " hp=" .. string.format("%.0f", hp)
             .. " aoe=" .. (aoe and "Y" or "N")
+            .. " aoeauto=" .. (
+                cfg.aoeAuto and ((cfg.aoeOverride ~= nil and ("manual/" .. (cfg.aoeOverride and "on" or "off")))
+                    or (aoeCount and tostring(aoeCount)) or "unknown") or "off")
+            .. " cc=" .. ccState
             .. " op=" .. ((now < (self.overpowerExpiry or 0)) and "Y" or "N")
             .. " rev=" .. ((now < (self.revengeExpiry or 0)) and "Y" or "N")
             .. " revseen=" .. (self.revengeSeen and "Y" or "N")
@@ -659,8 +901,13 @@ function M:Rotate(cfg)
     -- ----------------------------------------------------------------
     -- 0a. Bloodrage to keep rage flowing (works out of combat for pulls), but
     --     never while a Charge opener is pending - see chargePending above.
+    --     And never on a low health bar: Bloodrage costs 5% health on this
+    --     server (vanilla charged 16% of BASE health; the 1.18.1 client
+    --     rebalanced it), so a cast below 25% can land at worst at 20% - the
+    --     execute floor. A rage top-up is not worth dying for.
     if cfg.useBloodrage and not chargePending and self:KnowsSpell("Bloodrage")
-        and self:IsReady("Bloodrage") and rage < (cfg.bloodrageRage or 30) then
+        and self:IsReady("Bloodrage") and rage < (cfg.bloodrageRage or 30)
+        and hp > (cfg.bloodrageHealthPct or 25) then
         self:PickExtra("Bloodrage")
     end
 
@@ -724,7 +971,9 @@ function M:Rotate(cfg)
     if chargePending then
         if self:InStance("Battle Stance") then
             if self:IsReady("Charge") then
-                if self:Pick("Charge", "opener, out of melee") then return end
+                if self:Pick("Charge", "opener, out of melee") then
+                    return
+                end
             end
         elseif cfg.stanceDance or cfg.homeStance == "battle" then
             if self:SwitchStance("Battle Stance") then return end
@@ -732,6 +981,7 @@ function M:Rotate(cfg)
     end
 
     self:OverpowerLearnTick()
+    self:RevengeResolveTick()
 
     -- 1a. Revenge (Defensive). Mainly a tank reactive; only pursued while
     --     in Defensive, or stance-danced to it when home stance is Defensive.
@@ -742,25 +992,24 @@ function M:Rotate(cfg)
     --     gate, so Revenge is attempted on its cooldown instead. The first
     --     trigger read latches revengeSeen and this fallback never runs again.
     --
-    --     Bounded twice: only while already in Defensive Stance, so a guess can
-    --     never start a stance dance, and no more often than REVENGE_PROBE_GAP,
-    --     so a refused cast - which starts no cooldown - cannot be retried on
-    --     every press and stall the rest of the chain.
+    --     Bounded: only while already in Defensive Stance, so a guess can never
+    --     start a stance dance. The probe repeats at REVENGE_PROBE_GAP until a
+    --     trigger is read, so a refused cast - which starts no cooldown - cannot
+    --     be retried on every press and stall the rest of the chain.
     local revOpen = now < (self.revengeExpiry or 0)
-    local revProbe = false
-    if not revOpen and not self.revengeSeen and self:InStance("Defensive Stance")
-        and (now - (self.revengeProbeAt or 0)) >= REVENGE_PROBE_GAP then
-        revOpen, revProbe = true, true
-    end
-    if cfg.useRevenge and self:KnowsSpell("Revenge") and revOpen
+    local revProbe = not self.revengeSeen and self:InStance("Defensive Stance")
+        and (now - (self.revengeProbeAt or 0)) >= REVENGE_PROBE_GAP
+    if cfg.useRevenge and self:KnowsSpell("Revenge") and (revOpen or revProbe)
         and self:IsReady("Revenge") and rage >= RAGE["Revenge"] then
         if self:InStance("Defensive Stance") then
             local why = revProbe and "no trigger read yet, trying on cooldown"
                 or "block/dodge/parry window"
             if self:Pick("Revenge", why) then
                 self:Later(function()
-                    self.revengeExpiry = 0
-                    self.revengeProbeAt = GetTime()
+                    -- Bookmarked, not settled: RevengeResolveTick closes the
+                    -- window only on a confirmed cast, like Overpower.
+                    self.revengeAttemptAt = GetTime()
+                    if revProbe then self.revengeProbeAt = GetTime() end
                 end)
                 return
             end
@@ -883,7 +1132,7 @@ function M:Rotate(cfg)
     --      the target. Skipped in the execute phase so rage funnels to Execute,
     --      and skipped entirely on bleed-immune targets, where the debuff can
     --      never land and the "not up" test would otherwise re-cast forever.
-    if cfg.useRend and not inExecute and self:KnowsSpell("Rend")
+    if cfg.useRend and not inExecute and not aoe and self:KnowsSpell("Rend")
         and not self:TargetIsBleedImmune()
         and self:CanCast("Rend", RAGE["Rend"], STANCE_REQ["Rend"])
         -- Rend is per-caster. Demoralizing Shout above is shared and is
@@ -907,8 +1156,9 @@ function M:Rotate(cfg)
     -- 1f. Thunder Clap for AoE (Battle or Defensive stance on Turtle since 1.16.1).
     if aoe and cfg.useThunderClap and self:Try("Thunder Clap", "AoE") then return end
 
-    -- 1g. Sunder Armor upkeep (threat / armor reduction).
-    if cfg.useSunder and self:CanCast("Sunder Armor", RAGE["Sunder Armor"], nil)
+    -- 1g. Sunder Armor upkeep (threat / armor reduction). Skipped in AoE mode:
+    --     a GCD spent sundering one target does nothing for the three around it.
+    if cfg.useSunder and not aoe and self:CanCast("Sunder Armor", RAGE["Sunder Armor"], nil)
         and self:NeedSunder(cfg) then
         if self:Pick("Sunder Armor", "stack upkeep") then return end
     end
@@ -922,7 +1172,8 @@ function M:Rotate(cfg)
     --      And it stands down when its cast would run past the next white swing.
     --      Slam delays the swing rather than resetting it here, so this is worth
     --      an estimate but not worth being strict about: an unknown swing timer
-    --      lets it through.
+    --      lets it through, except before the very first swing of combat has
+    --      landed - Slam then delays the opener, which the rotation hangs off.
     if cfg.useSlam then
         local waiting = self:StrikeWaitingOnRage(cfg)
         if waiting then
@@ -952,11 +1203,39 @@ end
 -- ============================================================
 -- Class specific slash subcommands, dispatched from the core
 -- ============================================================
-function M:CmdAoe()
+function M:CmdAoe(arg, onoff)
     local cfg = Aegis_SBR:GetActiveProfile()
     if not cfg then msgOut("no profile active.", 1, 0.5, 0.3); return end
-    cfg.aoeMode = not cfg.aoeMode
-    msgOut("AoE mode " .. (cfg.aoeMode and "on (Cleave + Whirlwind)" or "off (single target)") .. ".")
+    if arg == "auto" then
+        -- `== nil` on purpose: false is a valid result and must not read as an error.
+        local v = Aegis_SBR:ToggleArg(cfg.aoeAuto, onoff)
+        if v == nil then
+            msgOut("usage: /sbr aoe auto [on|off] - no argument toggles.", 1, 0.5, 0.3)
+            return
+        end
+        cfg.aoeAuto = v
+        -- fresh start on (re)enable: the count decides until the manual line
+        -- gets pulled. `aoeMode` is left alone - the auto-off toggle keeps it.
+        cfg.aoeOverride = nil
+        msgOut("auto AoE " .. (v and "on (switch by enemy count)" or "off (manual toggle only)") .. ".")
+        return
+    end
+    if arg and arg ~= "" then
+        msgOut("usage: /sbr aoe | /sbr aoe auto [on|off]", 1, 0.5, 0.3)
+        return
+    end
+    if cfg.aoeAuto then
+        -- With auto on, /sbr aoe FORCES a side: first press off, next on,
+        -- then off again. nil (the idle hand) means the count decides.
+        cfg.aoeMode = false
+        cfg.aoeOverride = (cfg.aoeOverride == nil) and false or not cfg.aoeOverride
+        msgOut("AoE forced " .. (cfg.aoeOverride and "ON" or "OFF") .. " over auto "
+            .. "(next /sbr aoe flips it).")
+    else
+        cfg.aoeMode = not cfg.aoeMode
+        msgOut("AoE mode " .. (cfg.aoeMode and "on (Cleave + Whirlwind)" or "off (single target)")
+            .. ". auto=" .. (cfg.aoeAuto and "on" or "off") .. ".")
+    end
 end
 
 function M:CmdCd(mode)
@@ -1000,7 +1279,7 @@ function M:CmdSpell(alias, onoff)
 end
 
 function M:HandleCommand(cmd, t)
-    if cmd == "aoe"   then self:CmdAoe(); return true end
+    if cmd == "aoe"   then self:CmdAoe(t[2], t[3]); return true end
     if cmd == "cd"    then self:CmdCd(t[2]); return true end
     if cmd == "dance" then self:CmdDance(); return true end
     if cmd == "spell" then self:CmdSpell(t[2], t[3]); return true end
@@ -1106,6 +1385,9 @@ reactFrame:SetScript("OnEvent", function()
 
     if trigger then
         M.revengeExpiry = GetTime() + REACT_WINDOW
+        -- An unresolved attempt belonged to the window that just ended; a
+        -- fresh trigger opens a new one, and the leftover must not decide it.
+        M.revengeAttemptAt = nil
         -- Latched: the parse works on this client, so the rotation fallback is
         -- never needed again this session.
         M.revengeSeen = true

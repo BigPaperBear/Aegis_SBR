@@ -4,6 +4,61 @@ All notable changes to **Aegis: Single Button Rotation** (formerly **AutoRota**)
 
 ---
 
+## v1.2.32 — the warlock's dead ends, and the warrior picks its own AoE moment
+
+### 🐛 Warlock: four dead ends from one log
+
+- **Wand instead of Drain Life below 30% health, no DoTs at all.** With health under the
+  Drain Life line, the sustain channel waited for Corruption; with mana under the wand floor
+  the DoT ladder never ran; so the press wanded and the warlock kept bleeding. Under the mana
+  floor the sustain channel no longer waits for DoTs.
+- **No wand when Drain Life is out of range.** The wand's protection of an affordable channel
+  counted one that could not be cast at all. One `ChannelRefusal` answers both the send and
+  the wand: moving, out of range, or a target that takes no life drain.
+- **Immunity that ends.** A DoT learned immune stayed immune for the fight; a boss immune for
+  a phase froze the rotation past it. Learned immunity now expires after 20 seconds; a
+  permanent one costs one re-learning cast per window.
+- **Tapping up between fights pulled.** The idle Life Tap wants a press with no target, and
+  auto-acquire handed it a mob. A module can now hold acquisition for a press (`HoldAcquire`).
+- New: **Stop Immolate below** — Immolate's own stop line (0 = off), so the two-second cast
+  stays off a dying mob while the instant DoTs may keep going.
+
+### ✨ Warrior — auto AoE, CC respect, the swing after a disarm (Dio)
+
+Contributed by Dio, folded in from his tree:
+
+- **Auto AoE** (`aoeAuto`, off by default) decides the AoE switch from the drawn enemy count
+  in Whirlwind range: on at the slider value (default 2), off again at a single enemy, with a
+  short hold against a flickering nameplate. `/sbr aoe` stays a hard override while auto is
+  on (forces off, then on, alternating). A press mode (`/sbr run single|aoe`) outranks both.
+  Needs nameplates; a count that cannot be taken keeps the manual answer.
+- **Respect CC** (`aoeCc`, on by default) stands the whole AoE switch down while a control
+  effect that breaks on damage is on any enemy in the pack — Polymorph in any form, Freezing
+  Trap, Sap. The target is read through the vanilla API, the rest of the pack through
+  ClassicAPI; without it the pack reads "unknown", which never stands the switch down.
+- The AoE decision is made once before the priority list, so every AoE-gated ability and
+  the single-target upkeep see the same flag; Rend and Sunder Armor skip in AoE.
+- **The white swing comes back after a disarm.** The once-per-target swing guard never
+  learned the swing had stopped, so after re-arm it stayed off. The core reads the Disarm
+  debuff and, on the first press after it falls, restarts the swing once and clears the swing
+  timer so it reads unknown rather than stale. Slam waits one weapon cycle after that restart.
+- **Execute's real cost.** The rotation's floor was 10 rage where the client's is 15, so a
+  warrior at 10–14 rage cancelled Slam into a refused Execute. The floor is 15, Improved
+  Execute read like Improved Slam (13 / 10 at the two ranks).
+- **Bloodrage health gate.** Bloodrage costs health on this server; it no longer fires below
+  25% (`bloodrageHealthPct`).
+- The post-Charge Slam hold is gone: the swing latch proved unreliable there, and an unknown
+  swing timer never blocks Slam.
+- Overpower still stands: the proc is discarded when the cast is refused; the fix waits for
+  a log.
+
+Core, for the above: one nameplate walk serves the enemy count and the CC scan
+(`EnemiesNear`, `EnemiesNearCached`), `UnitAuraNames` reads harmful auras off any unit through
+ClassicAPI, `DisarmActive` reads the Disarm debuff, and `PressModeHeld` says whether a press
+mode is in force.
+
+---
+
 ## v1.2.31 — Mage: the press during a channel is queued, not thrown away
 
 ### 🐛 Fixed — the gap between Arcane Missiles channels

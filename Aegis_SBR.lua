@@ -17,7 +17,7 @@
 -- ============================================================
 
 Aegis_SBR = {
-    ver = "1.2.31",
+    ver = "1.2.32",
     classes = {},     -- token -> module table
     active = nil,      -- the module for this character's class
     Loaded = false,
@@ -1517,18 +1517,19 @@ function Aegis_SBR:DistanceTo(unit)
     return nil
 end
 
--- Enemies within `yards`, or nil when the count cannot be taken.
+-- The hostile units within `yards`, or nil when the count cannot be taken.
+-- Same walk as CountEnemiesNear below, but hands back the unit TOKENS so a
+-- caller can read something off each one (distance, auras). Sharing one walk
+-- matters: cheap extras like "target" resolve differently on the two read
+-- paths (ClassicAPI wants the token, the nameplate scan hands over a GUID),
+-- and two independent walks would drift apart.
 --
--- Cached for a fraction of a second: walking every WorldFrame child builds a
--- table each time, and doing that on every press in a raid is exactly the shape
--- of the cost this addon has been bitten by before.
-function Aegis_SBR:CountEnemiesNear(yards)
+-- Returned tokens are GUIDs where the nameplate resolved, plain tokens
+-- otherwise. Both answer to the vanilla unit APIs on this client.
+function Aegis_SBR:EnemiesNear(yards)
     if not yards or yards <= 0 then return nil end
-    local now = GetTime()
-    local c = self.enemyCount
-    if c and c.yards == yards and (now - c.t) < ENEMY_CACHE_TTL then return c.n end
 
-    local seen, n = {}, 0
+    local seen, list = {}, {}
     -- Deduplicated by GUID, never by unit token. The two sources below name the
     -- same mob differently: the nameplate scan hands over a GUID, and "target"
     -- is a token for a mob that also HAS a nameplate. Keyed by token, your own
@@ -1544,7 +1545,9 @@ function Aegis_SBR:CountEnemiesNear(yards)
         if seen[key] then return end
         seen[key] = true
         local d = self:DistanceTo(unit)
-        if d and d <= yards then n = n + 1 end
+        if d and d <= yards then
+            list[table.getn(list) + 1] = unit
+        end
     end
 
     -- Nameplates: the only source that sees a mob you have not targeted.
@@ -1570,8 +1573,35 @@ function Aegis_SBR:CountEnemiesNear(yards)
     consider("targettarget")
     consider("pettarget")
 
-    self.enemyCount = { yards = yards, n = n, t = now }
+    return list
+end
+
+-- Enemies within `yards`, or nil when the count cannot be taken.
+--
+-- Cached for a fraction of a second: walking every WorldFrame child builds a
+-- table each time, and doing that on every press in a raid is exactly the shape
+-- of the cost this addon has been bitten by before.
+function Aegis_SBR:CountEnemiesNear(yards)
+    if not yards or yards <= 0 then return nil end
+    local now = GetTime()
+    local c = self.enemyCount
+    if c and c.yards == yards and (now - c.t) < ENEMY_CACHE_TTL then return c.n end
+
+    local list = self:EnemiesNear(yards)
+    if not list then return nil end
+    local n = table.getn(list)
+    self.enemyCount = { yards = yards, n = n, list = list, t = now }
     return n
+end
+
+-- The cached enemy list, when it is still fresh for a radius already asked.
+-- Lets a second consumer (the warrior's CC scan) read auras off the same walk
+-- the count was built on instead of walking every nameplate again.
+function Aegis_SBR:EnemiesNearCached(yards)
+    local c = self.enemyCount
+    if not c or c.yards ~= yards or c.list == nil then return nil end
+    if GetTime() - c.t >= ENEMY_CACHE_TTL then return nil end
+    return c.list
 end
 
 -- ============================================================
@@ -2170,10 +2200,79 @@ function Aegis_SBR:WeaponEnchantId(slot)
     return mh
 end
 
+-- A disarm makes the swing impossible for its whole duration, so the once-per
+-- target guard below must not keep the swing off after it ends. The debuff
+-- name is resolved through SuperWoW's spell id where available (the same
+-- rank/locale-proof path the target snapshot uses), falling back to the icon
+-- fragment on clients without it.
+local DISARM_TTL = 0.5
+function Aegis_SBR:DisarmActive()
+    local now = GetTime()
+    if (self.disarmCheckAt or 0) + DISARM_TTL > now then return self.disarmActive end
+    self.disarmCheckAt = now
+    local found = false
+    for i = 1, 16 do
+        local tex, stacks, d3, d4, d5 = UnitDebuff("player", i)
+        if not tex then break end
+        local id
+        if type(d3) == "number" then id = d3
+        elseif type(d4) == "number" then id = d4
+        elseif type(d5) == "number" then id = d5 end
+        if (id and SpellInfo and SpellInfo(id) == "Disarm")
+            or (not id and tex and string.find(tex, "Warrior_Disarm")) then
+            found = true
+            break
+        end
+    end
+    self.disarmActive = found
+    return found
+end
+
 -- The Attack action's bar slot is cached: one IsAttackAction call verifies it
 -- each press, and the full 1..172 scan only runs when the cache is empty or
 -- the button was moved/removed.
 function Aegis_SBR:EnsureAutoAttack()
+    -- A disarm stops the white swing until it ends. Keep the latch armed while
+    -- it is up (a swing is impossible, so starting one is pointless; and the
+    -- swing state can be flushed when the client re-arms), then on the first
+    -- press after it falls: forget the once-per-target latch so the guards
+    -- below run again and restart the swing exactly once. Clearing lastSwing
+    -- too - no swing can have landed while disarmed, so the timer must read
+    -- unknown, not stale-but-alive.
+    if self:DisarmActive() then
+        self.disarmSeen = true
+        return
+    end
+    if self.disarmSeen then
+        self.disarmSeen = nil
+        self.attackToggledFor = nil
+        self.attackToggledName = nil
+        if Aegis_SBR.active then
+            Aegis_SBR.active.lastSwing = nil
+            Aegis_SBR.active.swingFromCastEvent = nil
+            Aegis_SBR.active.lastDisarmRestart = GetTime()
+        end
+        -- Start the swing directly. AttackTarget is a TOGGLE on 1.12 - it
+        -- STOPS a swing already running. After a disarm the weapon has just
+        -- returned and no swing can be in flight, so the toggle is safe:
+        -- it can only start the swing, not stop it. Bypasses both paths
+        -- below: the slot guard's IsCurrentAction is stale-true during a
+        -- disarm, and the no-slot toggle guard would fire twice in quick
+        -- succession and flip the swing OFF again.
+        if AttackTarget then
+            self:NoteSpellCast("Attack")
+            AttackTarget()
+        end
+        -- Mark the target as already toggled so any subsequent press
+        -- does not fire a second toggle that flips the swing OFF again.
+        local tgtId = self:TargetId()
+        local tgtNm = UnitName("target")
+        if tgtId then
+            self.attackToggledFor = tgtId
+            self.attackToggledName = tgtNm
+        end
+        return
+    end
     local slot = self.attackSlot
     if not (slot and IsAttackAction(slot)) then
         slot = nil
@@ -2222,9 +2321,12 @@ function Aegis_SBR:EnsureAutoAttack()
         -- fresh target, never enough to flip-flop under spam. If something else
         -- stops the swing later we deliberately do NOT retry, because from here
         -- "not swinging" and "swinging" are indistinguishable - a blind retry is
-        -- the bug being removed. Put Attack on a bar (any slot the stance/form
-        -- bar does not overwrite) to get the guarded path above, which can read
-        -- the state and restart the swing whenever it actually drops.
+        -- the bug being removed. A disarm is the one exception: DisarmActive
+        -- knows the swing must be down, so at re-arm the latch is dropped and
+        -- this fires once on the next press. Put Attack on a bar (any slot the
+        -- stance/form bar does not overwrite) to get the guarded path above,
+        -- which can read the state and restart the swing whenever it actually
+        -- drops.
         -- Identity has to be right here or the toggle above becomes the bug it
         -- was written to avoid. TargetId returns SuperWoW's GUID when it can and
         -- falls back to the unit NAME when it cannot, and which of the two comes
@@ -2841,6 +2943,12 @@ end
 -- preview window follows the macro being pressed rather than the profile.
 local PRESS_MODE_HOLD = 2.0
 
+-- Is a press mode (/sbr run single|aoe) in force for this press?
+function Aegis_SBR:PressModeHeld()
+    local m = self.pressAoe
+    return m ~= nil and (GetTime() - (self.pressAoeAt or 0)) <= PRESS_MODE_HOLD
+end
+
 function Aegis_SBR:AoeMode(cfg)
     local m = self.pressAoe
     if m ~= nil and (GetTime() - (self.pressAoeAt or 0)) <= PRESS_MODE_HOLD then
@@ -2916,7 +3024,10 @@ function Aegis_SBR:RunRotation(mode)
         -- (which needs an actual target) follow the tank hands-free.
         self:RunAssist()
     elseif not UnitExists("target") or UnitIsDead("target") then
-        if mode == "auto" and self.active.autoAcquireTarget ~= false and not supportRun then
+        -- A module may ask for the press to stay targetless (the warlock
+        -- tapping up between fights): then auto-acquire is skipped this press.
+        local hold = self.active.HoldAcquire and self.active:HoldAcquire(cfg)
+        if mode == "auto" and self.active.autoAcquireTarget ~= false and not supportRun and not hold then
             TargetNearestEnemy()
         elseif UnitExists("target") and UnitIsDead("target") then
             ClearTarget()

@@ -66,6 +66,19 @@ function M:BuildBody(ui, parent)
 
     L:Header("Threat / AoE")
     row("aoeMode", "AoE mode")
+    -- Auto AoE carries its pack-size slider on the same row (toggle+slider,
+    -- like Sunder Armor). When it flips, AoE enters/exits on the drawn enemy
+    -- count instead of the manual toggle. Registered into self.cb so the
+    -- RefreshBody bind loop treats it like any other toggle. Enabling clears
+    -- any /sbr aoe override so the count decides until the manual line is pulled.
+    self.autoAoeRow = L:Row{ key = "aoeAuto", label = "Auto AoE", spell = nil,
+        onToggle = function(v) if not ui.buf then return end
+            ui.buf.aoeAuto = v
+            if v then ui.buf.aoeOverride = nil end
+            ui:Refresh() end,
+        slider = { key = "aoeThreshold", min = 2, max = 5, step = 1, suffix = "", onChange = set("aoeThreshold") } }
+    self.cb.aoeAuto = self.autoAoeRow
+    row("aoeCc", "Respect CC")
     row("useSweeping", "Sweeping Strikes")
     -- Sunder Armor toggle carries its stack-count slider on the same row (like the
     -- other classes' toggle+slider rows), instead of a separate slider at the foot
@@ -119,6 +132,9 @@ function M:BuildBody(ui, parent)
     ui:Tip(self.cb.stanceDance.cb,     "Stance dancing (experimental)", "Auto-swaps to Battle for Overpower (and to Defensive for Revenge when home is Defensive), then drifts back to your home stance.", "Costs a little rage per swap; tune in game.")
     ui:Tip(self.stanceDD,              "Home stance",   "The stance the rotation returns to when dancing. Berserker for most DPS, Defensive for tanking.")
     ui:Tip(self.cb.aoeMode.cb,         "AoE mode",      "Switches the rage dump to Cleave and uses Whirlwind on cooldown. Flip mid-fight with /sbr aoe.")
+    ui:Tip(self.autoAoeRow.cb,         "Auto AoE",      "Decides AoE mode from the enemy count the client draws: on once the pack reaches the slider value, off again when it is back to a single mob.")
+    ui:Tip(self.autoAoeRow.slider,     "AoE pack size", "Auto AoE engages when this many enemies are in Whirlwind range (8 yd).")
+    ui:Tip(self.cb.aoeCc.cb,           "Respect CC",    "Stands AoE down while a control effect that breaks on damage (Polymorph in any form, Freezing Trap, Sap) is on any enemy in the pack.", "Damage breaks these, so an AoE that catches a sheeped/sapped mob undoes the control. Uses ClassicAPI (Recommended) for enemies other than your target; without it only your target is checked.")
     ui:Tip(self.cb.useSweeping.cb,     "Sweeping Strikes", "Fired on cooldown while AoE mode is on (off the global cooldown).")
     ui:Tip(self.cb.useSunder.cb,       "Sunder Armor",  "Applied as a filler up to the stack count beside it, then left to ride.")
     ui:Tip(self.cb.useThunderClap.cb,  "Thunder Clap",  "AoE filler. Usable in Battle or Defensive stance.")
@@ -163,6 +179,12 @@ function M:RefreshBody(ui, buf)
     if self.sunderRow.slider.valText then self.sunderRow.slider.valText:SetText(tostring(ss)) end
     -- the stacks slider follows the Sunder Armor toggle (greyed when off)
     ui:SliderEnable(self.sunderRow.slider, buf.useSunder and true or false)
+
+    -- auto-AoE pack size slider; greyed until Auto AoE is on
+    local at = buf.aoeThreshold or 2
+    self.autoAoeRow.slider:SetValue(at)
+    if self.autoAoeRow.slider.valText then self.autoAoeRow.slider.valText:SetText(tostring(at)) end
+    ui:SliderEnable(self.autoAoeRow.slider, buf.aoeAuto and true or false)
 
     local dr = buf.dumpRage or 60
     self.dumpRow.slider:SetValue(dr)

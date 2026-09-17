@@ -207,6 +207,29 @@ function Aegis_SBR:TargetDebuffDuration(name)
     return e.dur
 end
 
+-- HARMFUL aura names on an arbitrary unit token (GUID or plain token), via
+-- ClassicAPI. The snapshot above is target-fixed; the warrior's CC scan needs
+-- the same read for every mob the nameplate walk hands over, and it must come
+-- through this file per the C_* gate - one guarded call site per function.
+--
+-- Returns nil when ClassicAPI is absent, the unit does not resolve on it, or
+-- the read threw. Callers treat nil as "cannot tell", which for the CC scan
+-- means "not a reason to hold AoE back".
+function Aegis_SBR:UnitAuraNames(unit)
+    if not unit then return nil end
+    if not self:Capability("auras") then return nil end
+    local ok, list = pcall(C_UnitAuras.GetUnitAuras, unit, "HARMFUL")
+    if not ok or not list then return nil end
+    local names = {}
+    for i = 1, table.getn(list) do
+        local a = list[i]
+        if a and a.name and a.name ~= "" then
+            names[table.getn(names) + 1] = a.name
+        end
+    end
+    return names
+end
+
 -- ============================================================
 -- Spell range
 -- ============================================================
