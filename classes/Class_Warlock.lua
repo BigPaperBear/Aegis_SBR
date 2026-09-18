@@ -746,10 +746,24 @@ end
 --   * a target that takes no life drain (see LifeDrainImmune).
 function M:ChannelRefusal(name)
     if not M.CHANNELED[name] then return nil end
+    -- A school lockout (interrupted while casting) is not a debuff: the client
+    -- shows it as a cooldown of several seconds on every spell of the school.
+    -- Queue refuses such a spell, and the wand must not stay protected for it.
+    if self:LockedOut(name) then return "locked out" end
     if Aegis_SBR:Moving() then return "moving" end
     if M.TARGET_CHANNELS[name] and not Aegis_SBR:SpellReaches(name, "target") then return "out of range" end
     if name == "Drain Life" and self:LifeDrainImmune() then return "target takes no life drain" end
     return nil
+end
+
+-- Is this spell on a cooldown longer than the global one - its own, or the
+-- school lockout after an interrupt? Read off the spell itself.
+function M:LockedOut(name)
+    local slot = Aegis_SBR:FindSpellSlot(name)
+    if not slot then return false end
+    local start, dur = GetSpellCooldown(slot, BOOKTYPE_SPELL)
+    if not start or start == 0 then return false end
+    return (start + dur - GetTime()) > GCD + 0.1
 end
 
 function M:Queue(name, reason, busy)
@@ -1581,8 +1595,10 @@ M.dotPending = {}
 -- same lesson - a detection that never answers must not be the only thing a
 -- decision rests on.
 function M:QueueDot(spellName, id)
-    -- A hold (see Queue) is truthy but not a send: nothing to stamp.
-    if self:Queue(spellName, "DoT missing") ~= true then return end
+    -- A hold (see Queue) is truthy but not a send: nothing to stamp. A refusal
+    -- (false) is handed back so ApplyDot can move the ladder on.
+    local r = self:Queue(spellName, "DoT missing")
+    if r ~= true then return r end
     self:Later(function()
         local now = GetTime()
         -- A curse we have no icon for: watch what appears on the target.
@@ -1717,7 +1733,10 @@ function M:ApplyDot(spellName, texFrag, interval)
     -- About to re-send. Two confirmed casts on this target with nothing ever
     -- read back is an unannounced immunity - handled, not re-sent.
     if self:NoteDotUnseen(spellName, id) then return "up" end
-    self:QueueDot(spellName, id)
+    -- Refused outright (the school locked out after an interrupt, or the spell
+    -- on a cooldown of its own): nothing this press can do about this DoT, so
+    -- the ladder goes on and the press ends at the wand rather than here.
+    if self:QueueDot(spellName, id) == false then return "up" end
     return "cast"
 end
 
@@ -2242,8 +2261,7 @@ function M:Rotate(cfg)
     -- can even help you recover.
     if self:ManaPct() < (cfg.wandManaFloor or 15) then
         if cfg.lifeTap and self:KnowsSpell("Life Tap") and hp > (cfg.lifeTapHpMin or 40) then
-            self:Queue("Life Tap", "mana from health")
-            return
+            if self:Queue("Life Tap", "mana from health") then return end
         end
         if self:HasWand() then
             if self:WandRepeating() then return end
@@ -2379,8 +2397,7 @@ function M:Rotate(cfg)
     end
     if cfg.lifeTap and self:KnowsSpell("Life Tap") and not dhFirst then
         if self:ManaPct() < (cfg.lifeTapMana or 20) and self:PlayerHPPct() > (cfg.lifeTapHpMin or 40) then
-            self:Queue("Life Tap", "mana from health")
-            return
+            if self:Queue("Life Tap", "mana from health") then return end
         end
     end
 
@@ -2495,9 +2512,9 @@ function M:Rotate(cfg)
             local overrun = len - self:OwnCDLeft("Dark Harvest")
             if overrun <= DH_OVERRUN_MAX then
                 if self:Queue(gap, "gap channel") then return end
-                -- Refused, and Queue refuses a channel only for movement.
+                -- Refused (moving, out of range, locked out - see ChannelRefusal).
                 if self:HasWand() and not self:Wanding() then
-                    self:Shoot("wanding, moving")
+                    self:Shoot("wanding, channel refused")
                     return
                 end
             elseif self:Tracing() then
