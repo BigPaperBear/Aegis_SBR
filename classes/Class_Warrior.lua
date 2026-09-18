@@ -80,6 +80,10 @@ local SLAM_CAST_BASE = 2.5
 local SLAM_CAST_PER_RANK = 0.25
 local TALENT_IMP_SLAM = "Improved Slam"
 local TALENT_IMP_EXECUTE = "Improved Execute"
+-- Tactical Mastery 5/5 retains 25 rage across a stance switch - exactly
+-- Whirlwind's cost. Below that rank a dance leaves too little rage to spend,
+-- so the Whirlwind dance below is gated on rank, not assumed.
+local TALENT_TACTICAL_MASTERY = "Tactical Mastery"
 -- How long the Revenge fallback waits between attempts while the combat log
 -- has not answered even once. Matched to Revenge's own cooldown, so the
 -- fallback can never cost more than one press per cooldown.
@@ -98,6 +102,16 @@ local BSHOUT_RENEW = 30
 -- tooltip cannot be read. Matches the paladin's Consecration fallback.
 local AOE_RADIUS = 8
 
+-- Scan radius for an off-target enemy to interrupt. Matches the ~9.9yd
+-- melee proxy InMeleeRange uses, so a nearer nameplate caster is exactly as
+-- kickable as the target would be at that distance.
+local INTERRUPT_SCAN_YARDS = 10
+
+-- Whirlwind is only worth a global in AoE against three or more enemies;
+-- below that the single-target strikes beat it, and a stance dance for it
+-- is even less worth it. An unknown count lets it through (fail open).
+local WW_MIN_PACK = 3
+
 -- How long auto AoE holds before flipping back to single target once the pack
 -- drops below the threshold. Nameplates vanish and reappear (a mob steps out
 -- of range, interior walls, the fixed cap), so the mode must not thrash on a
@@ -109,6 +123,11 @@ local AOE_EXIT_HOLD = 1.0
 -- enemy counter article warns about; a fight's CC state changes on the order
 -- of seconds, not tenths.
 local CC_SCAN_TTL = 0.5
+
+-- After a Charge opener the warrior is mid-animation and out of Demo Shout
+-- range for a short window. Hold the shout so it does not waste a press on a
+-- client refusal; one successful Shout on arrival covers the same debuff window.
+local CHARGE_DEMO_HOLD = 2.0
 
 -- Stance key -> spell name. Used by the home-stance setting and switching.
 M.STANCES = {
@@ -145,6 +164,8 @@ local RAGE = {
     -- (tooltip confirmed). Zero rather than absent so the intent is explicit:
     -- there is no cost to check, not "we never looked".
     ["Concussion Blow"] = 0,
+    ["Pummel"]      = 10,   -- forgiving; verify Turtle tooltip if it feels strict
+    ["Shield Bash"] = 5,    -- forgiving; verify Turtle tooltip if it feels strict
 }
 
 -- Stances an ability may be used from (vanilla 1.12). nil = any stance.
@@ -161,8 +182,10 @@ local STANCE_REQ = {
     ["Berserker Rage"]= { "Berserker Stance" },
     ["Shield Block"]  = { "Defensive Stance" },
     ["Sweeping Strikes"]= { "Battle Stance" },
+    ["Pummel"]        = { "Berserker Stance" },
     -- Bloodthirst, Shield Slam, Slam, Sunder Armor, Heroic Strike, Cleave,
-    -- Death Wish, Bloodrage: usable in any stance (Shield Slam needs a shield).
+    -- Death Wish, Bloodrage, Shield Bash (interrupt, any stance): usable in
+    -- any stance (Shield Slam and Shield Bash need a shield).
 }
 
 M.spellAlias = {
@@ -190,6 +213,9 @@ M.spellAlias = {
     demoshout = "useDemoShout", demo = "useDemoShout",
     masterstrike = "useMasterStrike", mstrike = "useMasterStrike",
     concussionblow = "useConcussionBlow", cblow = "useConcussionBlow",
+    pummel = "usePummel",
+    shieldbash = "useShieldBash", sbash = "useShieldBash",
+    healonly = "interruptHealsOnly", honly = "interruptHealsOnly",
 }
 
 -- Templates: starting presets, copied into the char's saved profiles once.
@@ -207,6 +233,7 @@ M.templates = {
         useDeathWish = false, useRecklessness = false, useBerserkerRage = false,
         useBloodrage = true, bloodrageRage = 30, useShieldBlock = false,
         useCharge = false, useRend = false,
+        usePummel = false, useShieldBash = false,
     },
     fury = {
         useMortalStrike = false, useBloodthirst = true, useShieldSlam = false,
@@ -221,6 +248,7 @@ M.templates = {
         useDeathWish = true, useRecklessness = true, useBerserkerRage = true,
         useBloodrage = true, bloodrageRage = 30, useShieldBlock = false,
         useCharge = false, useRend = false,
+        usePummel = true, useShieldBash = true,
     },
     arms = {
         useMortalStrike = true, useBloodthirst = false, useShieldSlam = false,
@@ -230,11 +258,12 @@ M.templates = {
         useSunder = false, sunderStacks = 5, useThunderClap = false,
         aoeMode = false, useSweeping = true, useCleave = true,
         aoeAuto = false, aoeThreshold = 2, aoeCc = true,
-        useHeroicStrike = true, dumpRage = 50, wwExcess = 55,
+useHeroicStrike = true, dumpRage = 50, wwExcess = 55,
         popCDs = false, autoCDElite = true,
         useDeathWish = false, useRecklessness = true, useBerserkerRage = true,
         useBloodrage = true, bloodrageRage = 30, useShieldBlock = false,
         useCharge = false, useRend = false,
+        usePummel = true, useShieldBash = true,
     },
     prot = {
         useMortalStrike = false, useBloodthirst = false, useShieldSlam = true,
@@ -249,6 +278,7 @@ M.templates = {
         useDeathWish = false, useRecklessness = false, useBerserkerRage = false,
         useBloodrage = true, bloodrageRage = 30, useShieldBlock = true,
         useCharge = false, useRend = false,
+        usePummel = false, useShieldBash = true,
     },
 }
 
@@ -268,6 +298,14 @@ function M:NormalizeProfile(c)
         useDeathWish = false, useRecklessness = false, useBerserkerRage = false,
         useBloodrage = true, bloodrageRage = 30, useShieldBlock = false,
         useCharge = false, useRend = false,
+        -- Pummel / Shield Bash interrupts: off until opted into, like every
+        -- other reactive here. Both fire only while the target is mid-cast
+        -- (SuperWoW cast events), so they change nothing without SuperWoW.
+        usePummel = false, useShieldBash = false,
+        -- Interrupt tuning: heal-only kicks only confirmed heal casts (built-in
+        -- list + interruptHealList inclusions); min-time shortens what is worth
+        -- a kick. All off/zero by default = interrupt anything mid-cast.
+        interruptHealsOnly = false, interruptMinTime = 0, interruptHealList = {},
         -- Battle Shout on by default (near-universal AP buff); Demoralizing Shout
         -- off by default (opt-in mitigation debuff, mainly for tanking).
         useBattleShout = true, useDemoShout = false,
@@ -522,6 +560,46 @@ function M:CancelSlamForExecute()
     return true
 end
 
+-- Cancel a running Slam so an interrupt can go out.
+--
+-- The interrupt is off-GCD, so after Slam's cast completes the next press can
+-- still kick: canceling then would throw the Slam away for nothing. The castEnd
+-- test confines the cancel to the tail of the enemy cast - the window closes
+-- before Slam lands either way, so the Kick is the whole gain. Unknown cast end
+-- (nil) is cancelled, matching the fail-open rule.
+--
+-- Used by both interrupt paths (target and nearby caster), after the interrupt
+-- pick is already chosen, so a cancel is never spent on a pick that cannot cast.
+-- Through Later, so a preview never cancels a real cast.
+function M:CancelSlamForInterrupt(castEnd)
+    if not self:SlamCasting() then return false end
+    if castEnd and castEnd > (self.slamCastUntil or 0) then return false end
+    self:Later(function()
+        if self:Tracing() then self:Trace("cancelling Slam, interrupt is up") end
+        SpellStopCasting()
+        self.slamCastUntil = nil
+    end)
+    return true
+end
+
+-- Cancel a running Slam so an AoE ability can go out.
+--
+-- Slam is single-target with a cast time, so in AoE it has no value to wait
+-- for: an auto-AoE flip (or a manual one) can land mid-cast and the press
+-- after it would be lost waiting out a cast that is now the wrong ability.
+-- No timing gate - unlike the interrupt cancel, there is no case where the
+-- Slam is worth keeping in AoE. The caller has already verified the replacing
+-- ability can cast. Through Later, so a preview never cancels a real cast.
+function M:CancelSlamForAoE()
+    if not self:SlamCasting() then return false end
+    self:Later(function()
+        if self:Tracing() then self:Trace("cancelling Slam, AoE ability up") end
+        SpellStopCasting()
+        self.slamCastUntil = nil
+    end)
+    return true
+end
+
 -- The strike Slam should be waiting for, or nil.
 --
 -- Slam sits below the primary strikes already, so the ORDER was never the
@@ -595,6 +673,124 @@ function M:Try(name, reason)
         return self:Pick(name, reason)
     end
     return false
+end
+
+-- ============================================================
+-- Heal-cast detection for the heal-only interrupt toggle
+--
+-- 1.12 has no spell-school API, so "is this a heal" is a name match against
+-- every vanilla cast-time / channeled heal (instants like Renew and Rejuvenation
+-- never carry a cast duration, so there is nothing to interrupt anyway - they
+-- are deliberately absent). Turtle custom heal names go in the per-profile
+-- inclusion list (cfg.interruptHealList), matched the same way.
+-- ============================================================
+local INTERRUPT_HEALS = {
+    ["heal"] = true, ["greater heal"] = true, ["flash heal"] = true,
+    ["prayer of healing"] = true,
+    ["holy light"] = true, ["flash of light"] = true,
+    ["healing touch"] = true, ["regrowth"] = true, ["tranquility"] = true,
+    ["healing wave"] = true, ["lesser healing wave"] = true, ["chain heal"] = true,
+}
+
+-- True when this cast name is a known heal (built-in list or the profile's
+-- inclusion list). An unknown or unresolvable name answers FALSE deliberately:
+-- heal-only is a preference filter - only kick what is confirmed to be a heal.
+function M:IsHealCast(name, cfg)
+    if not name then return false end
+    local n = string.lower(name)
+    if INTERRUPT_HEALS[n] then return true end
+    local list = cfg.interruptHealList
+    if list then
+        for i = 1, table.getn(list) do
+            if string.lower(list[i]) == n then return true end
+        end
+    end
+    return false
+end
+
+-- Inclusion-list add/remove (case-insensitive, never duplicated). Mirrors the
+-- healers' PrioAdd/PrioRemove so the UI can use the same button+slot shape.
+function M:IntHealAdd(cfg, name)
+    if not name or name == "" then return false end
+    if type(cfg.interruptHealList) ~= "table" then cfg.interruptHealList = {} end
+    local n = string.lower(name)
+    for i = 1, table.getn(cfg.interruptHealList) do
+        if string.lower(cfg.interruptHealList[i]) == n then return false end
+    end
+    table.insert(cfg.interruptHealList, name)
+    return true
+end
+
+function M:IntHealRemove(cfg, idx)
+    if type(cfg.interruptHealList) ~= "table" then return false end
+    if not cfg.interruptHealList[idx] then return false end
+    table.remove(cfg.interruptHealList, idx)
+    return true
+end
+
+-- ============================================================
+-- Interrupt pick
+--
+-- TargetIsCasting() (core) is true whenever a non-instant cast is in progress.
+-- Pick whichever interrupt is castable in the current stance — no dance, the
+-- window is too short for the stance CD. Shield Bash is usable in any stance
+-- but needs a shield; Pummel is Berserker-only but free to check. Returns the
+-- spell name if castable, nil otherwise.
+--
+-- castStart (core TargetCastStart) feeds the refusal backoff: an interrupt that
+-- was refused since this cast began (LOS, not facing) is not re-picked for the
+-- same window. nil castStart = "cannot tell" -> SpellRefusedSince answers false
+-- -> the gate stays open, matching the fail-open rule.
+--
+-- No stance dance by design: the ~1s stance internal CD is enough to slip past
+-- a fast cast. A tank in Defensive has Shield Bash; a Fury/Arms warrior in
+-- Berserker has Pummel. Neither interrupts correctly from the other stance.
+-- ============================================================
+function M:InterruptPick(cfg, castStart)
+    if cfg.usePummel and self:KnowsSpell("Pummel") and self:IsReady("Pummel")
+        and not Aegis_SBR:SpellRefusedSince("Pummel", castStart)
+        and self:Rage() >= RAGE["Pummel"]
+        and self:InAnyStance(STANCE_REQ["Pummel"]) then
+        return "Pummel"
+    end
+    if cfg.useShieldBash and self:KnowsSpell("Shield Bash") and self:IsReady("Shield Bash")
+        and not Aegis_SBR:SpellRefusedSince("Shield Bash", castStart)
+        and self:Rage() >= RAGE["Shield Bash"]
+        and (not WEAPON_REQ["Shield Bash"] or Aegis_SBR:WeaponAllows(WEAPON_REQ["Shield Bash"])) then
+        return "Shield Bash"
+    end
+    return nil
+end
+
+-- The nearby ENEMY (not the current target) that is mid-cast and interruptible,
+-- or nil. Walks the same nameplate scan the enemy counter uses, so it sees a
+-- caster you have not targeted; nil scan = "cannot tell" = no kick, the same
+-- withhold stance TargetIsCasting takes without SuperWoW. The returned cast
+-- start feeds the same SpellRefusedSince backoff the target path uses, so a
+-- refusal belongs to the cast being kicked.
+--
+-- A nameplate GUID is the unit token; on SuperWoW clients a GUID answers the
+-- unit APIs and CastSpellByName's unit argument alike.
+function M:NearCaster(cfg)
+    local list = Aegis_SBR:EnemiesNear(INTERRUPT_SCAN_YARDS)
+    if not list then return nil end
+    for i = 1, table.getn(list) do
+        local u = list[i]
+        if not UnitIsUnit(u, "target") then
+            local _, guid = UnitExists(u)
+            if guid and Aegis_SBR:EnemyIsCasting(guid) then
+                -- Same filters as the target path: min-time, then heal-only.
+                local castDur = Aegis_SBR:EnemyCastDuration(guid)
+                if (not castDur) or castDur >= (cfg.interruptMinTime or 0) then
+                    local castName = Aegis_SBR:EnemyCastName(guid)
+                    if (not cfg.interruptHealsOnly) or self:IsHealCast(castName, cfg) then
+                        return { guid = guid, start = Aegis_SBR:EnemyCastStart(guid) }
+                    end
+                end
+            end
+        end
+    end
+    return nil
 end
 
 -- ============================================================
@@ -687,6 +883,30 @@ function M:TargetIsBleedImmune()
     return self.bleedImmune
 end
 
+-- Spellcasters take full Shout damage but their damage is spells, not
+-- attack power - so Demoralizing Shout contributes nothing against them and
+-- wastes a GCD + 10 rage. Only melee/stance-reliant targets get the shout.
+-- `UnitClass` cannot answer here: most caster mobs have no class ("Unknown"),
+-- so a class list would only catch PvP-style classed NPCs and miss everything
+-- else. The reliable signal is casting itself: the moment the unit is seen
+-- casting or channeling (UnitCastingInfo / UnitChannelInfo, a snapshot that
+-- works on any mob), that fact is latched for this target id, and the shout
+-- stands down. A target never seen casting answers "cannot tell" (the very
+-- first cast may just not have happened yet), which must not close the gate -
+-- unknown keeps the shout, exactly like the creature-type checks above.
+function M:TargetIsSpellcaster()
+    local id = Aegis_SBR:TargetId()
+    if id ~= self.shoutCasterId then
+        self.shoutCasterId = id
+        self.shoutCasterSeen = false
+    end
+    if (UnitCastingInfo and UnitCastingInfo("target"))
+        or (UnitChannelInfo and UnitChannelInfo("target")) then
+        self.shoutCasterSeen = true
+    end
+    return self.shoutCasterSeen
+end
+
 -- ============================================================
 -- CC-aware AoE decision
 --
@@ -734,6 +954,16 @@ function M:AoEPackUnits()
     local list = Aegis_SBR:EnemiesNearCached(radius)
     if not list then list = Aegis_SBR:EnemiesNear(radius) end
     return list
+end
+
+-- Whirlwind is worth a global in AoE only against a real pack (>= 3
+-- enemies). A count that cannot be taken must not close the gate - same
+-- rule as everywhere else: unknown answers fire, exactly as before.
+function M:AoEWWPack()
+    local radius = Aegis_SBR:SpellRadius("Whirlwind") or AOE_RADIUS
+    local n = Aegis_SBR:CountEnemiesNear(radius)
+    if n == nil then return true end
+    return n >= WW_MIN_PACK
 end
 
 -- true when a damage-breakable control is on any readable enemy, false when
@@ -856,6 +1086,38 @@ function M:Rotate(cfg)
     local inExecute = cfg.useExecute and hp <= 20 and self:KnowsSpell("Execute")
         and rage >= self:ExecuteCost() and not self:InStance("Defensive Stance")
 
+    -- Interrupt state for the trace, resolved once here: the in-progress cast
+    -- name plus which filter (if any) suppressed the kick. intname=none means
+    -- no cast in progress; int=off/range/min/heal/backoff/kick says why the
+    -- interrupt branch did or did not pick.
+    local intCastName, intState
+    if self:Tracing() then
+        intCastName = Aegis_SBR:TargetCastName()
+        intState = "off"
+        if cfg.usePummel or cfg.useShieldBash then
+            if not Aegis_SBR:TargetIsCasting() then
+                -- No cast on the target: the off-target scan decides. NearCaster
+                -- applies the same filters, so "off" here means nothing kickable
+                -- nearby either; "near" is a kick that consumes the press.
+                local nearT = self:NearCaster(cfg)
+                if nearT then
+                    intCastName = Aegis_SBR:EnemyCastName(nearT.guid)
+                    intState = self:InterruptPick(cfg, nearT.start) and "near" or "nearbackoff"
+                else
+                    intState = "off"
+                end
+            elseif not self:InMeleeRange() then
+                intState = "range"
+            elseif (Aegis_SBR:TargetCastDuration() or 0) < (cfg.interruptMinTime or 0) then
+                intState = "min"
+            elseif cfg.interruptHealsOnly and not self:IsHealCast(intCastName, cfg) then
+                intState = "heal"
+            else
+                intState = self:InterruptPick(cfg, Aegis_SBR:TargetCastStart()) and "kick" or "backoff"
+            end
+        end
+    end
+
     if self:Tracing() then
         self:Trace("rage=" .. rage
             .. " stance=" .. (self:CurrentStanceName() or "-")
@@ -868,6 +1130,8 @@ function M:Rotate(cfg)
             .. " op=" .. ((now < (self.overpowerExpiry or 0)) and "Y" or "N")
             .. " rev=" .. ((now < (self.revengeExpiry or 0)) and "Y" or "N")
             .. " revseen=" .. (self.revengeSeen and "Y" or "N")
+            .. " intname=" .. (intCastName or "none")
+            .. " int=" .. intState
             -- Demoralizing Shout, because its upkeep loop on a target that
             -- cannot take the debuff was reported from play and left no trace
             -- at all: "up" is whether the debuff is on the target, "takes" is
@@ -899,15 +1163,33 @@ function M:Rotate(cfg)
     -- ----------------------------------------------------------------
     -- 0. Off-GCD / on-next-swing layer (fire and continue, no return)
     -- ----------------------------------------------------------------
-    -- 0a. Bloodrage to keep rage flowing (works out of combat for pulls), but
-    --     never while a Charge opener is pending - see chargePending above.
+    -- 0a. Bloodrage as opening prep: out of combat it front-loads for the next
+    --     engagement (Charge → Bloodrage), and never while a Charge opener is
+    --     pending - see chargePending above. In combat it is NOT a "low rage
+    --     → press" toggle: the value is the 10-rage instant + 1/sec front-load
+    --     unlocking a cast THIS press, so it fires only when a strike is ready
+    --     but unaffordable, an Execute needs the top-up to reach its floor, or
+    --     a Slam fits the swing window but lacks rage. Generating comfortably
+    --     from auto-attacks? Saved for the next pull.
     --     And never on a low health bar: Bloodrage costs 5% health on this
     --     server (vanilla charged 16% of BASE health; the 1.18.1 client
     --     rebalanced it), so a cast below 25% can land at worst at 20% - the
     --     execute floor. A rage top-up is not worth dying for.
     if cfg.useBloodrage and not chargePending and self:KnowsSpell("Bloodrage")
         and self:IsReady("Bloodrage") and rage < (cfg.bloodrageRage or 30)
-        and hp > (cfg.bloodrageHealthPct or 25) then
+        and hp > (cfg.bloodrageHealthPct or 25)
+        -- A real target is required, not just the rage line: out-of-combat pulls
+        -- are the point of the toggle, but standing idly - or running between
+        -- packs with nothing selected - is not a pull, and burning 5% health for
+        -- rage that decays before any fight is a plain loss.
+        and UnitExists("target") and UnitCanAttack("player", "target")
+        and not UnitIsDeadOrGhost("target")
+        and (not inCombat
+            or self:StrikeWaitingOnRage(cfg)
+            or (cfg.useExecute and hp <= 20 and self:KnowsSpell("Execute")
+                and self:Rage() < self:ExecuteCost())
+            or (cfg.useSlam and self:KnowsSpell("Slam")
+                and rage < RAGE["Slam"] and self:SlamFitsBeforeSwing())) then
         self:PickExtra("Bloodrage")
     end
 
@@ -963,6 +1245,74 @@ function M:Rotate(cfg)
     -- 1. GCD priority (strict, exactly one cast per press via early return)
     -- ----------------------------------------------------------------
 
+    -- 1@i. Interrupt (Pummel / Shield Bash). Top priority: an interrupted
+    --      heal or buff is worth more than any strike. Fires only when the
+    --      target is mid-cast (SuperWoW cast events) and the chosen interrupt
+    --      is ready and castable in the CURRENT stance — no stance dance for
+    --      interrupts, the ~1s internal CD is too slow for a fast cast.
+    --      Consumes the press like any other pick; off-GCD means the next
+    --      press gets the strike back immediately. Without SuperWoW this is
+    --      inert (TargetIsCasting answers false = safe: withholds).
+    --
+    --      Gated on InMeleeRange: both interrupts are melee abilities, and
+    --      without the gate a casting enemy at range got the interrupt picked,
+    --      refused by the client, and re-picked on every press for the whole
+    --      cast - the same wasted-press loop as the Demo Shout charge bug. The
+    --      gate also lets a casting pull target fall through to Charge below.
+    --
+    --      interruptMinTime (default 0) withholds the kick on casts shorter
+    --      than the setting - the user's explicit choice, so this may close a
+    --      gate where a capability toggle may not. An unknown duration (nil)
+    --      is allowed through (fail open).
+    if (cfg.usePummel or cfg.useShieldBash) and Aegis_SBR:TargetIsCasting()
+        and self:InMeleeRange() then
+        local castStart = Aegis_SBR:TargetCastStart()
+        local castDur = Aegis_SBR:TargetCastDuration()
+        local castName = Aegis_SBR:TargetCastName()
+        if (not castDur) or castDur >= (cfg.interruptMinTime or 0) then
+            if (not cfg.interruptHealsOnly) or self:IsHealCast(castName, cfg) then
+                local ptr = self:InterruptPick(cfg, castStart)
+                if ptr then
+                    -- Slam mid-cast would lock the client out of the kick:
+                    -- cancel it (only when the enemy cast ends first, see
+                    -- CancelSlamForInterrupt) so this press lands the interrupt.
+                    self:CancelSlamForInterrupt(castStart and castStart + (castDur or 0))
+                    if self:Pick(ptr, "target casting") then return end
+                end
+            end
+        end
+    end
+
+    -- 1@i'. Same interrupt, off-target: the nearest casting enemy in melee
+    --      range that is NOT the current target. Reached only when the target
+    --      path above did not pick (no cast on the target, target out of melee,
+    --      or the filters withheld). Casts at the enemy's GUID without dropping
+    --      your target - SuperWoW's unit argument, so a tank holding aggro does
+    --      not switch targets to kick the caster behind the pack.
+    --
+    --      Same filters and the same SpellRefusedSince backoff, keyed to the
+    --      cast being kicked. The nameplate walk already capped the scan at
+    --      INTERRUPT_SCAN_YARDS, so the melee-range gate is structural here.
+    --      Without SuperWoW the walk sees no nameplate GUIDs, answers nil, and
+    --      this path is as inert as the target path.
+    if (cfg.usePummel or cfg.useShieldBash) then
+        local near = self:NearCaster(cfg)
+        if near then
+            local ptr = self:InterruptPick(cfg, near.start)
+            if ptr then
+                -- Same Slam cancel as the target path; the enemy cast ends
+                -- before Slam lands (or the cast end is unknown = fail open).
+                local cend = near.start
+                if cend then
+                    local cdur = Aegis_SBR:EnemyCastDuration(near.guid)
+                    if cdur then cend = cend + cdur end
+                end
+                self:CancelSlamForInterrupt(cend)
+                if self:PickAt(ptr, near.guid, "nearby caster") then return end
+            end
+        end
+    end
+
     -- 1@. Charge opener (toggle). Battle Stance only, and only as a pull: you
     --     must be OUT of melee range (so it is a gap-closer, never mid-fight)
     --     with an attackable target. Stance-dances to Battle if enabled and
@@ -972,6 +1322,7 @@ function M:Rotate(cfg)
         if self:InStance("Battle Stance") then
             if self:IsReady("Charge") then
                 if self:Pick("Charge", "opener, out of melee") then
+                    self.lastChargeAt = GetTime()
                     return
                 end
             end
@@ -1031,6 +1382,15 @@ function M:Rotate(cfg)
     -- 1c. Overpower (Battle), reactive. Stance-dance in when enabled.
     if cfg.useOverpower and self:KnowsSpell("Overpower") and now < (self.overpowerExpiry or 0)
         and self:IsReady("Overpower") and rage >= RAGE["Overpower"] then
+        -- A press that lands inside Slam's cast is a refused attempt: the cast
+        -- locks the client, and the refusal teaches the learned window to
+        -- shrink to the 2.5s floor that Slam's own 2.5s cast then consumes
+        -- whole - which reads in game as "Overpower never procs" whenever the
+        -- dodge lands while Slam is mid-flight. Consume the press instead: no
+        -- attempt, no refusal, and the window stays open for the press after
+        -- the cast lands. Slam is the warrior's only cast, so this is the only
+        -- lock to wait out.
+        if self:SlamCasting() then return end
         if self:InStance("Battle Stance") then
             if self:Pick("Overpower", "target dodged") then
                 self:Later(function()
@@ -1050,18 +1410,42 @@ function M:Rotate(cfg)
         end
     end
 
-    -- 1c2. Whirlwind FIRST while in AoE mode. It sits at 1e below for the
-    --      single-target rage dump, which is the right place for that job - but
-    --      against several targets it hits all of them and Mortal Strike hits
-    --      one, so letting the primary strike take the press there is a plain
-    --      loss. Reported as Mortal Strike still going first in AoE.
+    -- 1c2. Whirlwind FIRST while in AoE mode, against a real pack (3+ enemies
+    --      - AoEWWPack). It sits at 1e below for the single-target rage dump,
+    --      which is the right place for that job - but against several targets
+    --      it hits all of them and Mortal Strike hits one, so letting the
+    --      primary strike take the press there is a plain loss. Reported as
+    --      Mortal Strike still going first in AoE.
     --
     --      Only in AoE, and the copy below still handles the rage dump: if this
     --      does not fire (cooldown, rage, wrong stance) the press falls through
-    --      exactly as before.
-    if aoe and cfg.useWhirlwind
+    --      exactly as before. A Slam still casting is stopped so the Whirlwind
+    --      goes out now instead of after the cast.
+    if aoe and cfg.useWhirlwind and self:AoEWWPack()
         and self:CanCast("Whirlwind", RAGE["Whirlwind"], STANCE_REQ["Whirlwind"]) then
+        self:CancelSlamForAoE()
         if self:Pick("Whirlwind", "AoE, ahead of the primary strike") then return end
+    elseif aoe and cfg.useWhirlwind and cfg.stanceDance and not self:SlamCasting()
+        and self:AoEWWPack()
+        and self:TalentRank(TALENT_TACTICAL_MASTERY) >= 5
+        and rage >= RAGE["Whirlwind"]
+        and self:KnowsSpell("Whirlwind") and self:IsReady("Whirlwind")
+        and not self:InStance("Berserker Stance") then
+        -- Not in Berserker but Tactical Mastery 5/5 keeps 25 rage through the
+        -- swap, which exactly covers Whirlwind's cost. Dance in; 1i drifts back
+        -- to the home stance once the Whirlwind is away.
+        if self:SwitchStance("Berserker Stance") then return end
+    end
+
+    -- 1c2b. Thunder Clap jumps ahead in AoE like Whirlwind does: it hits every
+    --      enemy in range where the primary strike hits one. Battle/Defensive
+    --      stance on 1.12, so a berserker falls through to the strikes - the
+    --      stance gate is what keeps the two AoE jumps from competing for the
+    --      same press. Cancels a stale Slam like the Whirlwind jump does.
+    if aoe and cfg.useThunderClap
+        and self:CanCast("Thunder Clap", RAGE["Thunder Clap"], STANCE_REQ["Thunder Clap"]) then
+        self:CancelSlamForAoE()
+        if self:Pick("Thunder Clap", "AoE, ahead of the primary strike") then return end
     end
 
     -- 1d. Primary strike on cooldown. Usually only one of these is known /
@@ -1117,7 +1501,15 @@ function M:Rotate(cfg)
     -- 1d1b. Demoralizing Shout upkeep (opt-in; AoE attack-power reduction on the
     --       target for mitigation). Debuff-tracked like Rend, re-applied only
     --       when it is not on the target. Any stance; skipped during execute.
+    --       Skipped on ranged casters (TargetIsSpellcaster + not in melee): AP
+    --       reduction does nothing to a spell user at range. A caster in melee
+    --       range still auto-attacks, so the AP reduction applies to their melee
+    --       swings and the shout is worth it. Also held for CHARGE_DEMO_HOLD
+    --       after a Charge opener so it does not fire while the warrior is still
+    --       mid-animation and out of range.
     if cfg.useDemoShout and not inExecute
+        and not (self:TargetIsSpellcaster() and not self:InMeleeRange())
+        and (GetTime() - (self.lastChargeAt or 0)) > CHARGE_DEMO_HOLD
         and self:CanCast("Demoralizing Shout", RAGE["Demoralizing Shout"], nil)
         and self:TargetTakesShout()
         and not Aegis_SBR:TargetDebuffUp("Demoralizing Shout", "Ability_Warrior_WarCry") then
@@ -1145,16 +1537,14 @@ function M:Rotate(cfg)
         end
     end
 
-    -- 1e. Whirlwind: on cooldown in AoE, or as a single-target rage dump
-    --     when rage is running high. Berserker stance only.
-    if cfg.useWhirlwind and self:CanCast("Whirlwind", RAGE["Whirlwind"], STANCE_REQ["Whirlwind"]) then
-        if aoe or rage >= (cfg.wwExcess or 60) then
+    -- 1e. Whirlwind: against a real 3+ pack in AoE, or as a single-target rage
+    --     dump when rage is running high. Berserker stance only.
+    if cfg.useWhirlwind and not self:SlamCasting()
+        and self:CanCast("Whirlwind", RAGE["Whirlwind"], STANCE_REQ["Whirlwind"]) then
+        if (aoe and self:AoEWWPack()) or rage >= (cfg.wwExcess or 60) then
             if self:Pick("Whirlwind", aoe and "AoE" or "rage dump") then return end
         end
     end
-
-    -- 1f. Thunder Clap for AoE (Battle or Defensive stance on Turtle since 1.16.1).
-    if aoe and cfg.useThunderClap and self:Try("Thunder Clap", "AoE") then return end
 
     -- 1g. Sunder Armor upkeep (threat / armor reduction). Skipped in AoE mode:
     --     a GCD spent sundering one target does nothing for the three around it.
@@ -1163,7 +1553,10 @@ function M:Rotate(cfg)
         if self:Pick("Sunder Armor", "stack upkeep") then return end
     end
 
-    -- 1h. Slam filler (Arms), behind two gates it did not have before.
+    -- 1h. Slam filler (Arms), behind two gates it did not have before, and
+    --      stood down entirely in AoE mode - the 2.5s single-target cast is a
+    --      loss against a pack, where the GCD belongs to Whirlwind / Thunder
+    --      Clap (which jump ahead via 1c2/1c2b).
     --
     --      It yields to a primary strike that is ready and only short of rage -
     --      being the cheapest ability in the list, it used to take those presses
@@ -1174,13 +1567,13 @@ function M:Rotate(cfg)
     --      an estimate but not worth being strict about: an unknown swing timer
     --      lets it through, except before the very first swing of combat has
     --      landed - Slam then delays the opener, which the rotation hangs off.
-    if cfg.useSlam then
+    if cfg.useSlam and not aoe then
         local waiting = self:StrikeWaitingOnRage(cfg)
         if waiting then
             if self:Tracing() then self:Trace("slam held: " .. waiting .. " is ready, waiting on rage") end
         elseif not self:SlamFitsBeforeSwing() then
             if self:Tracing() then self:Trace("slam held: would clip the next swing") end
-        elseif self:Try("Slam", "filler") then
+        elseif not self:SlamCasting() and self:Try("Slam", "filler") then
             -- For CancelSlamForExecute above. SlamCastTime folds in Improved Slam.
             self:Later(function()
                 self.slamCastUntil = GetTime() + self:SlamCastTime()
@@ -1354,6 +1747,7 @@ end)
 
 local reactFrame = CreateFrame("Frame")
 reactFrame:RegisterEvent("CHAT_MSG_COMBAT_SELF_MISSES")              -- our attacks that were avoided
+reactFrame:RegisterEvent("CHAT_MSG_SPELL_SELF_DAMAGE")               -- ability dodge: "Your Slam was dodged by X."
 reactFrame:RegisterEvent("CHAT_MSG_COMBAT_CREATURE_VS_SELF_MISSES")  -- enemy attacks we fully avoided
 reactFrame:RegisterEvent("CHAT_MSG_COMBAT_CREATURE_VS_SELF_HITS")    -- enemy attacks we partially blocked
 reactFrame:RegisterEvent("CHAT_MSG_COMBAT_HOSTILEPLAYER_MISSES")     -- the same two in PvP: a player
@@ -1361,8 +1755,11 @@ reactFrame:RegisterEvent("CHAT_MSG_COMBAT_HOSTILEPLAYER_HITS")       -- attacker
 reactFrame:SetScript("OnEvent", function()
     if not arg1 then return end
 
-    -- Overpower: our own attack, avoided by the target. Unchanged.
-    if event == "CHAT_MSG_COMBAT_SELF_MISSES" then
+    -- Overpower: our own attack, avoided by the target. The client reports an
+    -- ability dodge ("Your Slam was dodged by Sparkleshell Snapper.") through
+    -- the SPELL channel, not SELF_MISSES - a dodge that never matched made the
+    -- whole window dead on this client. Listen on both; only the word decides.
+    if event == "CHAT_MSG_COMBAT_SELF_MISSES" or event == "CHAT_MSG_SPELL_SELF_DAMAGE" then
         if string.find(string.lower(arg1), "dodge") then
             -- Both: the expiry the rotation gates on, and the moment itself, so
             -- the age of an attempt can be worked out afterwards.

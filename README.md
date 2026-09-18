@@ -1,4 +1,4 @@
-# Aegis: Single Button Rotation (v1.2.32)
+# Aegis: Single Button Rotation (v1.2.33)
 
 **One button. Your whole rotation.**
 
@@ -286,7 +286,7 @@ A roleless, toggle-driven engine covering Arms, Fury, and Protection from early 
 - **Overpower learns its own window:** The reactive window starts when the combat log tells us the target dodged, which is later than the dodge itself — so its tail used to fire into a window the server had already closed. When the client refuses an Overpower, the window shortens to just under the age of that attempt. It only ever shrinks, and never below a floor.
 - **Optional Master Strike:** The Arms talent *Master Strike* is available as an opt-in toggle (off by default, since it's mainly a PvP pick). Enabled, it fires on cooldown from a slot **directly below your spec's primary strike**, so it fills the gaps while *Mortal Strike* / *Bloodthirst* / *Shield Slam* are cooling down and never delays them. It appears once talented and shows *(not learned)* until then.
 - **Leveling Toggles (off by default):** *Charge* opens a pull from range in Battle Stance — self-limiting, since the client blocks it once you're in combat, so it only ever fires on the initial gap-close. *Rend* keeps its bleed up in Battle or Defensive Stance and yields during *Execute* so rage funnels there instead. Neither toggle is meant for endgame play.
-- **Reliable Auto-Attack:** If *Attack* isn't placed on an action bar, the addon falls back to starting the swing directly, so melee always engages without a manual `/startattack`. After a **disarm** the swing is restarted once on the first press after the weapon returns (all melee classes). *Execute* is gated at its real 15 rage (13 / 10 with Improved Execute); *Bloodrage* costs health here and is held below 25%.
+- **Reliable Auto-Attack:** If *Attack* isn't placed on an action bar, the addon falls back to starting the swing directly, so melee always engages without a manual `/startattack`. After a **disarm** the swing is restarted once on the first press after the weapon returns (all melee classes). **Interrupts** have their own section: *Pummel* / *Shield Bash* on a casting target, a **min cast time** so short filler casts keep the kick for the big heal, a **heal-only** filter with an inclusion list (`/sbr spell healonly`), and — with SuperWoW — a kick at a casting enemy in melee range that is *not* your target, without changing it. A running *Slam* is cancelled for a kick or an AoE ability, Slam is not started in AoE, and Whirlwind in AoE waits for three enemies in its radius. *Execute* is gated at its real 15 rage (13 / 10 with Improved Execute); *Bloodrage* costs health here and is held below 25%.
 </details>
 
 <details>
