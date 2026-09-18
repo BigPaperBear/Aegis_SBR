@@ -4,6 +4,23 @@ All notable changes to **Aegis: Single Button Rotation** (formerly **AutoRota**)
 
 ---
 
+## v1.2.34 — locked out, so wand
+
+### 🐛 Warlock: a spell lock left the rotation standing
+
+Interrupted mid-cast, the school is locked for several seconds. That is not a debuff; the
+client shows it as a cooldown on every spell of the school, and the rotation read each of
+those as "not this one" and ended the press on nothing — the wand never came, reported as
+the rotation refusing to wand while spell-locked.
+
+Read off the spell itself now (`LockedOut`): a channel on such a cooldown counts as refused,
+so the wand's protection of an affordable channel lets go; a DoT whose send is refused tells
+the ladder "nothing to do" instead of ending the press, so the press runs on to the filler
+and the wand; Life Tap refused for the same reason falls through as well. When the lock
+ends the cooldowns vanish and the rotation resumes by itself.
+
+---
+
 ## v1.2.33 — the interrupt reaches past your target
 
 ### ✨ Warrior — interrupts, and Slam gives way (Dio)
