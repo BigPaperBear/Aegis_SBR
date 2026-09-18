@@ -641,6 +641,7 @@ function Aegis_SBR_Layout:_sep()
     t:SetPoint("TOPLEFT", P, "TOPLEFT", 10, self.y)
     t:SetPoint("TOPRIGHT", P, "TOPRIGHT", -10, self.y)
     if self.cur then self.cur:_add(t, false) end
+    return t
 end
 
 -- Point a control's hover at a row highlight. Chains any existing OnEnter/
@@ -970,7 +971,7 @@ end
 -- Used for free-text settings that open a dialog on click (poison presets).
 -- Returns the button; caller reads btn.label / btn.value to update text.
 function Aegis_SBR_Layout:Button(o)
-    self:_sep()
+    local sep = self:_sep()
     local hl = self:_hl(LAY.VROW_H)
     local P = self.host or self.p
     local btn = CreateFrame("Button", nil, P)
@@ -989,6 +990,7 @@ function Aegis_SBR_Layout:Button(o)
     val:SetTextColor(PAL.mute[1], PAL.mute[2], PAL.mute[3])
     btn.label = lab
     btn.value = val
+    btn.sep = sep
     if o.onClick then btn:SetScript("OnClick", o.onClick) end
     wireHover(btn, hl)
     self:_rec(btn, true); self:_rec(lab, false); self:_rec(val, false)

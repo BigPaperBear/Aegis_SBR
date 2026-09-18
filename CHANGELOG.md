@@ -4,6 +4,36 @@ All notable changes to **Aegis: Single Button Rotation** (formerly **AutoRota**)
 
 ---
 
+## v1.2.33 — the interrupt reaches past your target
+
+### ✨ Warrior — interrupts, and Slam gives way (Dio)
+
+Contributed by Dio, folded in from his tree:
+
+- **Interrupts.** A new *Interrupt* section: Pummel / Shield Bash on a casting target, with
+  a **min cast time** (short filler casts keep the kick for the big heal), a **heal-only**
+  filter with its own inclusion list (`/sbr spell healonly`), and a refusal backoff keyed to
+  the cast being kicked. When the target is not casting, the nameplates in melee range are
+  scanned and the first enemy mid-cast is kicked **at its GUID without changing the target**
+  (SuperWoW's unit cast, new core `PickAt`); without SuperWoW the scan answers "cannot tell"
+  and nothing fires. Enemy channels count as casts. A running Slam is cancelled for a kick
+  that would otherwise land too late.
+- **Slam and AoE.** Slam is not started in AoE, and a running Slam is cancelled when an AoE
+  ability is up. Whirlwind in AoE needs three enemies in its radius (a count that cannot be
+  taken lets it through).
+- **Overpower** is armed by a dodge reported on the ability channel too (a dodged Slam), not
+  only by white swings.
+
+Core, for the above: an enemy-cast ledger by GUID (`EnemyIsCasting`, `EnemyCastName`,
+`EnemyCastStart`, `EnemyCastDuration`, with the target readouts alongside), `PickAt(name,
+unit)` casting at a unit without changing the target, and `UNIT_CASTEVENT` channels recorded
+like casts. Trace: `int=near` / `int=nearbackoff` and the kicked spell's name.
+
+Untested in play beyond Dio's own runs; the off-target kick wants a fight with a caster off
+to the side.
+
+---
+
 ## v1.2.32 — the warlock's dead ends, and the warrior picks its own AoE moment
 
 ### 🐛 Warlock: four dead ends from one log

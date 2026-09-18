@@ -17,7 +17,7 @@
 -- ============================================================
 
 Aegis_SBR = {
-    ver = "1.2.32",
+    ver = "1.2.33",
     classes = {},     -- token -> module table
     active = nil,      -- the module for this character's class
     Loaded = false,
@@ -477,6 +477,26 @@ function Aegis_SBR:CastAtMouse(name, reason, send)
         return false
     end
     return sent and true or false
+end
+
+-- Pick at a specific unit without changing the current target (SuperWoW's
+-- unit argument to CastSpellByName). Same press/bookkeeping contract as Pick;
+-- only the cast target differs. Vanilla 1.12's CastSpellByName second argument
+-- is a rank string, so this must never run on a client without SuperWoW -
+-- callers reach it only through the enemy-cast ledger, which no SuperWoW means
+-- never fills, so the gate is structural rather than a version check.
+function Aegis_SBR:PickAt(name, unit, reason)
+    if not name or not self:KnowsSpell(name) then return false end
+    if Aegis_SBR.deciding then
+        local p = Aegis_SBR.decidePlan
+        p.spell = name
+        p.reason = reason
+        return true
+    end
+    Aegis_SBR.pressSeq = (Aegis_SBR.pressSeq or 0) + 1
+    Aegis_SBR:NoteSpellCast(name)
+    CastSpellByName(name, unit)
+    return true
 end
 
 function Aegis_SBR:Later(fn)
@@ -1620,16 +1640,28 @@ end
 -- meaningful duration), which is correct: there is nothing to interrupt.
 -- ============================================================
 Aegis_SBR.enemyCastEnd = {}
+Aegis_SBR.enemyCastName = {}
+Aegis_SBR.enemyCastStart = {}
+Aegis_SBR.enemyCastDur = {}
 
-function Aegis_SBR:NoteEnemyCast(guid, ms)
+function Aegis_SBR:NoteEnemyCast(guid, ms, name)
     if not guid then return end
     local secs = tonumber(ms)
     if not secs or secs <= 0 then return end
-    self.enemyCastEnd[guid] = GetTime() + (secs / 1000)
+    local now = GetTime()
+    self.enemyCastEnd[guid] = now + (secs / 1000)
+    self.enemyCastStart[guid] = now
+    self.enemyCastDur[guid] = secs / 1000
+    self.enemyCastName[guid] = name
 end
 
 function Aegis_SBR:ClearEnemyCast(guid)
-    if guid then self.enemyCastEnd[guid] = nil end
+    if guid then
+        self.enemyCastEnd[guid] = nil
+        self.enemyCastName[guid] = nil
+        self.enemyCastStart[guid] = nil
+        self.enemyCastDur[guid] = nil
+    end
 end
 
 -- True only when a cast is genuinely still running. Answers FALSE without
@@ -1643,6 +1675,63 @@ function Aegis_SBR:TargetIsCasting()
     if not t then return false end
     if GetTime() > t then self.enemyCastEnd[guid] = nil; return false end
     return true
+end
+
+-- The in-progress cast's spell name / start time / total duration, for the
+-- current target. Each answers nil when nothing is casting or the detail was
+-- not captured (no SuperWoW, or the event carried no duration) - callers treat
+-- nil as "cannot tell" and must not let it close a gate.
+function Aegis_SBR:TargetCastName()
+    if not UnitExists("target") then return nil end
+    local _, guid = UnitExists("target")
+    if not guid then return nil end
+    if not self:TargetIsCasting() then return nil end
+    return self.enemyCastName[guid]
+end
+
+function Aegis_SBR:TargetCastStart()
+    if not UnitExists("target") then return nil end
+    local _, guid = UnitExists("target")
+    if not guid then return nil end
+    if not self:TargetIsCasting() then return nil end
+    return self.enemyCastStart[guid]
+end
+
+function Aegis_SBR:TargetCastDuration()
+    if not UnitExists("target") then return nil end
+    local _, guid = UnitExists("target")
+    if not guid then return nil end
+    if not self:TargetIsCasting() then return nil end
+    return self.enemyCastDur[guid]
+end
+
+-- GUID-keyed siblings of the Target* readouts above, for a caster that is NOT
+-- the current target. Same expiry rule and the same "nil when nothing casting
+-- or the detail was not captured" contract. Nameplate GUIDs are the only way
+-- to learn a non-targeted enemy's cast on this client, so these keep the
+-- off-target interrupt honest: an entry is real (UNIT_CASTEVENT with the
+-- caster's GUID) and still running, or it answers nil.
+function Aegis_SBR:EnemyIsCasting(guid)
+    if not guid then return false end
+    local t = self.enemyCastEnd[guid]
+    if not t then return false end
+    if GetTime() > t then self.enemyCastEnd[guid] = nil; return false end
+    return true
+end
+
+function Aegis_SBR:EnemyCastName(guid)
+    if not self:EnemyIsCasting(guid) then return nil end
+    return self.enemyCastName[guid]
+end
+
+function Aegis_SBR:EnemyCastStart(guid)
+    if not self:EnemyIsCasting(guid) then return nil end
+    return self.enemyCastStart[guid]
+end
+
+function Aegis_SBR:EnemyCastDuration(guid)
+    if not self:EnemyIsCasting(guid) then return nil end
+    return self.enemyCastDur[guid]
 end
 
 -- ============================================================
@@ -3498,8 +3587,13 @@ ev:SetScript("OnEvent", function()
         if Aegis_SBR.ProbeOnTotem then Aegis_SBR:ProbeOnTotem(arg1) end
     elseif event == "UNIT_CASTEVENT" then
         -- Somebody else's cast starting or ending. Recorded for every unit, not
-        -- just the target: you can be switched onto a mob mid-cast.
-        if arg3 == "START" then Aegis_SBR:NoteEnemyCast(arg1, arg5)
+        -- just the target: you can be switched onto a mob mid-cast. CHANNEL is
+        -- handled like START so channeled casts (Mind Flay, NPC Whirlwind) are
+        -- interruptible too; arg4 carries the spell id for the name ledger.
+        if arg3 == "START" or arg3 == "CHANNEL" then
+            local sname
+            if arg4 and SpellInfo then sname = SpellInfo(arg4) end
+            Aegis_SBR:NoteEnemyCast(arg1, arg5, sname)
         elseif arg3 == "CAST" or arg3 == "FAIL" then Aegis_SBR:ClearEnemyCast(arg1) end
         -- Only successful casts ("CAST"), and only if the active module wants them.
         if arg3 == "CAST" and Aegis_SBR.active and Aegis_SBR.active.OnCastEvent then

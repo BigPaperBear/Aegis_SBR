@@ -23,6 +23,7 @@ local SPELL_OF = {
     useBattleShout = "Battle Shout", useDemoShout = "Demoralizing Shout",
     useMasterStrike = "Master Strike",
     useConcussionBlow = "Concussion Blow",
+    usePummel = "Pummel", useShieldBash = "Shield Bash",
     stanceDance = nil, aoeMode = nil, popCDs = nil, autoCDElite = nil,
     slamCancelForExecute = nil,
 }
@@ -63,6 +64,41 @@ function M:BuildBody(ui, parent)
     row("useRevenge", "Revenge")
     row("stanceDance", "Stance dancing")
     self.stanceDD = L:Dropdown("homeStance", "Home stance", 150, set("homeStance"))
+
+    self.intSection = L:Header("Interrupt")
+    row("usePummel", "Pummel")
+    row("useShieldBash", "Shield Bash")
+    row("interruptHealsOnly", "Heal-only interrupt")
+    -- Minimum cast length worth kicking (0 = interrupt anything). Greyed until
+    -- an interrupt toggle is on, like every owning-toggle slider above.
+    self.minTimeRow = L:Row{ label = "Min cast time",
+        slider = { key = "interruptMinTime", min = 0, max = 3, step = 0.5, suffix = "s", onChange = set("interruptMinTime") } }
+    -- Inclusion list for heal-only: user-added spell names (Turtle custom
+    -- heals) on top of the built-in vanilla heal list. Button row + fixed
+    -- numbered slots, same shape as the heal-target lists on the healers.
+    self.intHealAddBtn = L:Button{ label = "Add heal spell", onClick = function()
+        if not ui.buf then return end
+        Aegis_SBR_UI:ShowDialog({
+            prompt = "Heal spell to interrupt (name only, no rank — e.g. Greater Heal)",
+            withInput = true,
+            onAccept = function(txt)
+                if ui.buf and txt then M:IntHealAdd(ui.buf, txt); ui:Refresh() end
+            end,
+        })
+    end }
+    self.intHealClearBtn = L:Button{ label = "Clear heal list", onClick = function()
+        if ui.buf then ui.buf.interruptHealList = {}; ui:Refresh() end
+    end }
+    self.intHealBtns = {}
+    local slotY0 = L.y  -- cursor Y where the first slot row sits
+    for i = 1, 8 do
+        local idx = i
+        self.intHealBtns[idx] = L:Button{ label = idx .. ".", onClick = function()
+            if ui.buf then M:IntHealRemove(ui.buf, idx); ui:Refresh() end
+        end }
+    end
+    self.intHealBaseY = slotY0
+    self.intHealStep = (slotY0 - L.y) / table.getn(self.intHealBtns)
 
     L:Header("Threat / AoE")
     row("aoeMode", "AoE mode")
@@ -131,6 +167,13 @@ function M:BuildBody(ui, parent)
     ui:Tip(self.cb.useRevenge.cb,      "Revenge",       "Defensive stance only. Fires after you block, dodge, or parry.")
     ui:Tip(self.cb.stanceDance.cb,     "Stance dancing (experimental)", "Auto-swaps to Battle for Overpower (and to Defensive for Revenge when home is Defensive), then drifts back to your home stance.", "Costs a little rage per swap; tune in game.")
     ui:Tip(self.stanceDD,              "Home stance",   "The stance the rotation returns to when dancing. Berserker for most DPS, Defensive for tanking.")
+    ui:Tip(self.cb.usePummel.cb,         "Pummel",        "Berserker Stance. Instant interrupt, off the global cooldown, 10s cooldown.", "Fires only while the target is mid-cast (needs SuperWoW cast events). If the target is not casting, the nearest casting enemy in melee range is kicked instead, without changing your target. Consumes the press for that press, but off-GCD means the next press gets the strike back immediately. No stance dance for interrupts: the stance internal CD is too slow.")
+    ui:Tip(self.cb.useShieldBash.cb,     "Shield Bash",    "Any stance (needs a shield equipped). Instant interrupt, off the global cooldown, 12s cooldown.", "Fires only while the target is mid-cast (needs SuperWoW cast events). If the target is not casting, the nearest casting enemy in melee range is kicked instead, without changing your target. With Gag Order talented it silences the target for 5s after the interrupt. Off-GCD; consumes that one press only.")
+    ui:Tip(self.cb.interruptHealsOnly.cb, "Heal-only interrupt", "Only interrupt when the cast in progress is a confirmed heal - every vanilla cast/channel-time heal, plus whatever you add to the list below.", "An unrecognised spell name is never interrupted in this mode; it is a filter, so unknown stops the kick rather than passing it. Instant heals (Renew, Rejuvenation) carry no cast time and are never interruptible anyway.")
+    ui:Tip(self.minTimeRow.slider,         "Min cast time",      "Only interrupt casts at least this long. Short filler casts keep their interrupt cooldown for the big heal after.", "0 = interrupt anything.")
+    ui:Tip(self.intHealAddBtn,             "Add heal spell",     "Add a Turtle-custom heal name to the heal-only list (name only, no rank). The built-in list already covers every vanilla heal.")
+    ui:Tip(self.intHealClearBtn,           "Clear heal list",    "Remove every custom entry; the built-in vanilla heal list stays.")
+    ui:Tip(self.intHealBtns[1], "Heal list slots",    "Rows appear as you add heal spells, up to 8. Click a row to remove that entry.")
     ui:Tip(self.cb.aoeMode.cb,         "AoE mode",      "Switches the rage dump to Cleave and uses Whirlwind on cooldown. Flip mid-fight with /sbr aoe.")
     ui:Tip(self.autoAoeRow.cb,         "Auto AoE",      "Decides AoE mode from the enemy count the client draws: on once the pack reaches the slider value, off again when it is back to a single mob.")
     ui:Tip(self.autoAoeRow.slider,     "AoE pack size", "Auto AoE engages when this many enemies are in Whirlwind range (8 yd).")
@@ -193,6 +236,38 @@ function M:RefreshBody(ui, buf)
     local ww = buf.wwExcess or 60
     self.wwRow.slider:SetValue(ww)
     if self.wwRow.slider.valText then self.wwRow.slider.valText:SetText(tostring(ww)) end
+
+    -- interrupt min-time slider; greyed until an interrupt toggle is on
+    local mt = buf.interruptMinTime or 0
+    self.minTimeRow.slider:SetValue(mt)
+    if self.minTimeRow.slider.valText then self.minTimeRow.slider.valText:SetText(tostring(mt)) end
+    ui:SliderEnable(self.minTimeRow.slider, (buf.usePummel or buf.useShieldBash) and true or false)
+
+    -- heal-only inclusion list slots: one row per entry, up to the built
+    -- pool of 8. Hide unused rows and their hairlines, then shrink the card
+    -- to the visible rows - Reflow runs after RefreshBody and re-stacks the
+    -- sections below using the updated height.
+    local ilist = buf.interruptHealList or {}
+    local pool = table.getn(self.intHealBtns)
+    local n = table.getn(ilist)
+    if n > pool then n = pool end
+    for i = 1, pool do
+        local b = self.intHealBtns[i]
+        if i <= n then
+            b.value:SetText(ilist[i] or "|cff666666(empty)|r")
+            b:Show()
+            if b.sep then b.sep:Show() end
+        else
+            b:Hide()
+            if b.sep then b.sep:Hide() end
+        end
+    end
+    if self.intSection then
+        local h = -self.intHealBaseY + n * self.intHealStep + 4
+        if h < 4 then h = 4 end
+        self.intSection.h = h
+        self.intSection.cont:SetHeight(h)
+    end
 end
 
 -- Open the shared window for this class.
