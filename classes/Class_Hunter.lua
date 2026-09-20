@@ -417,7 +417,6 @@ end
 
 function M:Pick(name, reason)
     if not Aegis_SBR:CanAfford(name) then self:TraceCost(name); return false end
-    if not Aegis_SBR.deciding and self:Tracing() then self:Trace("-> " .. name .. " (" .. (reason or "") .. ")") end
     return Aegis_SBR.Pick(self, name, reason)
 end
 

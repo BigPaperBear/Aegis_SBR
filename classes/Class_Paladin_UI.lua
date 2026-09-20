@@ -56,8 +56,11 @@ M.specTabs = {
 -- ============================================================
 function M:BuildBody(ui, parent)
     local L = ui:NewLayout(parent)
-    local function set(field)  return function(v) if ui.buf then ui.buf[field] = v; ui:Refresh() end end end
-    local function sset(key)   return function(v) if ui.buf then ui.buf.spells[key] = v; ui:Refresh() end end end
+    -- Every write lands in the ACTIVE TAB's layer (see M:SpecConfig): the view
+    -- of the buffer is the tab's, and the tab's alone.
+    local function V() return M:TabView(ui.buf, M) end
+    local function set(field)  return function(v) if ui.buf then V()[field] = v; ui:Refresh() end end end
+    local function sset(key)   return function(v) if ui.buf then V().spells[key] = v; ui:Refresh() end end end
 
     -- Tank: Lay on Hands only. A bubble drops every point of threat, so it is
     -- not offered here at all - see the tooltip.
@@ -84,17 +87,18 @@ function M:BuildBody(ui, parent)
     -- uses, aimed at nobody but you - so the controls are the same ones, and
     -- they write the same profile fields.
     L:Header("Self-healing", "solo")
-    self.selfSoloRow = L:Row{ label = "Heal yourself below",
-        slider = { key = "healSelfPct", min = 0, max = 100, step = 5, suffix = "%", onChange = set("healSelfPct") } }
     self.hsSoloRow = L:Row{ key = "useHolyShock", label = "Holy Shock below", spell = "Holy Shock", onToggle = set("useHolyShock"),
         slider = { key = "holyShockPct", min = 0, max = 100, step = 5, suffix = "%", onChange = set("holyShockPct") } }
     self.ratioSoloRow = L:Row{ label = "Holy Light below",
         slider = { key = "ratioHealthy", min = 0, max = 100, step = 5, suffix = "%", onChange = set("ratioHealthy") } }
+    self.selfSoloRow = L:Row{ key = "soloUseFlash", label = "Flash of Light below", spell = "Flash of Light", onToggle = set("soloUseFlash"),
+        slider = { key = "healSelfPct", min = 0, max = 100, step = 5, suffix = "%", onChange = set("healSelfPct") } }
     self.reloadSoloRow = L:Row{ key = "healReloadCS", label = "Strike only to reset Holy Shock", onToggle = set("healReloadCS") }
 
     L:Header("Seals", { tank = true, solo = true, retri = true })
-    self.debuffDD = L:Dropdown("seal_debuff", "Debuff", 200, function(v) if ui.buf then ui.buf.seals.debuff = v; ui:Refresh() end end)
-    self.damageDD = L:Dropdown("seal_damage", "Damage", 200, function(v) if ui.buf then ui.buf.seals.damage = v; ui:Refresh() end end)
+    self.debuffDD = L:Dropdown("seal_debuff", "Debuff", 200, function(v) if ui.buf then V().seals.debuff = v; ui:Refresh() end end)
+    self.damageDD = L:Dropdown("seal_damage", "Damage", 200, function(v) if ui.buf then V().seals.damage = v; ui:Refresh() end end)
+    self.judgeRow = L:Row{ key = "judgeSeals", label = "Judge the seals", spell = "Judgement", onToggle = set("judgeSeals") }
 
     L:Header("Strikes", { tank = true, solo = true, retri = true })
     self.spellCB = {}
@@ -117,7 +121,7 @@ function M:BuildBody(ui, parent)
     self.spellCB.exorcism = L:Row{ key = "exorcism", label = "Exorcism", spell = "Exorcism", onToggle = sset("exorcism") }
     self.twistRow = L:Row{ key = "sealTwist", label = "Seal twisting", onToggle = set("sealTwist") }
 
-    L:Header("Mana management", { tank = true, solo = true, retri = true })
+    L:Header("Mana management", { tank = true, retri = true })
     self.manaRow = L:Row{ key = "manaManage", label = "Mana management", spell = "Seal of Wisdom", onToggle = set("manaManage") }
     self.manaLowRow = L:Row{ label = "Switch below",
         slider = { key = "manaLow", min = 0, max = 100, step = 5, suffix = "%", onChange = set("manaLow") } }
@@ -127,7 +131,7 @@ function M:BuildBody(ui, parent)
         slider = { key = "manaWeaveMin", min = 0, max = 100, step = 5, suffix = "%", onChange = set("manaWeaveMin") } }
     self.wisdomRow = L:Row{ key = "manaWisdomDebuff", label = "Wisdom debuff in mana mode", onToggle = set("manaWisdomDebuff") }
 
-    L:Header("HP management", { tank = true, solo = true, retri = true })
+    L:Header("HP management", { tank = true, retri = true })
     self.hpRow = L:Row{ key = "hpManage", label = "HP management", spell = "Seal of Light", onToggle = set("hpManage") }
     self.hpLowRow = L:Row{ label = "Switch below",
         slider = { key = "hpLow", min = 0, max = 100, step = 5, suffix = "%", onChange = set("hpLow") } }
@@ -149,7 +153,7 @@ function M:BuildBody(ui, parent)
     self.ratioHealthyRow = L:Row{ label = "Holy Light below",
         slider = { key = "ratioHealthy", min = 0, max = 100, step = 5, suffix = "%", onChange = set("ratioHealthy") } }
     self.hpsBtn = L:Button{ label = "Toggle HPS mode", onClick = function()
-        if ui.buf then M:ToggleHPS(ui.buf); ui:Refresh() end
+        if ui.buf then M:ToggleHPS(V()); ui:Refresh() end
     end }
 
 
@@ -277,12 +281,13 @@ function M:BuildBody(ui, parent)
     ui:Tip(self.panicHealRow.slider, "Under the bubble, heal to", "While Divine Shield holds, heal yourself until you reach this much health, then carry on fighting. 0 is off.", "Ten seconds of immunity is the only completely safe casting time a paladin gets - no damage, so no pushback and no dying mid-cast. Reaching the goal ends it, and so does the bubble dropping; nothing is carried over into the moment you can be hit again. Lay on Hands is never used on top of a bubble at all - there is nothing to heal against while nothing can hurt you.")
     ui:Tip(self.lohDpsRow.slider, "Lay on Hands below", "Below this share of your health, Lay on Hands is cast on yourself. 0 is off.", "The deeper of the two: it heals you to full and costs no threat, but drains all your mana and runs on an hour's cooldown. Set it lower than the shield above, so it is only reached once the cheap answer is unavailable.")
     ui:Tip(self.lohRow.slider, "Lay on Hands below", "Below this share of your own health, Lay on Hands is cast on yourself before anything else. 0 is off.", "The tank's version of the healer's emergency bubble, and deliberately a different spell: a bubble drops every point of threat you have built, which hands the pull to somebody who cannot survive it. Lay on Hands costs no threat - it does cost all your mana, which is why it sits behind a threshold you set yourself.")
-    ui:Tip(self.selfSoloRow.slider, "Heal yourself below", "Below this share of your health the rotation heals you instead of hitting things. 0 never heals.", "The same engine the healer page uses, aimed at nobody but you - so Holy Shock, Flash of Light and Holy Light are all chosen the same way, Holy Judgement's speed-up included.")
-    ui:Tip(self.hsSoloRow.cb, "Holy Shock below", "Holy Shock as the instant self-heal, for when a cast would arrive too late.", "It cannot be pushed back, which is what makes it the answer while four things are hitting you. The strike setting below exists to keep it coming back.")
-    ui:Tip(self.ratioSoloRow.slider, "Holy Light below", "Holy Light is only used under this health, and only when no Flash of Light is big enough to cover the deficit.", "Your talents cut pushback by most of it, so a cast heal is a real option here rather than a gamble.")
+    ui:Tip(self.hsSoloRow.cb, "Holy Shock below", "First choice: the instant self-heal, used whenever you are under this line and it is off cooldown.", "It costs only the global, so the press after it is back on damage; Crusader Strike brings it back (Blessed Strikes).")
+    ui:Tip(self.ratioSoloRow.slider, "Holy Light below", "Second choice, when Holy Shock is on cooldown: the big heal under this line.", "The longer cast, but one heal lasts long enough for real damage to happen before the next.")
+    ui:Tip(self.selfSoloRow.cb, "Flash of Light below", "Off by default. In defensive gear a Flash barely moves the bar; switch it on only if you want the small fast heal under this line as a last resort.")
     ui:Tip(self.reloadSoloRow.cb, "Strike only to reset Holy Shock", "Crusader Strike is used when - and only when - Holy Shock is on cooldown and Blessed Strikes can bring it back.", "Farming, the strikes are not a damage source: Holy Strike's returns to you are halved and both strikes share one cooldown, so spending it on anything but the reset costs you the self-heal it would have bought. The damage comes from Consecration, the aura proc and your blocks.")
     ui:Tip(self.debuffDD, "Debuff seal", "Judged once to apply its debuff to the target.", "Autoattacks keep the debuff up afterwards.")
     ui:Tip(self.damageDD, "Damage seal", "Judged continuously for damage.", "Leaves no debuff, so it never overwrites the one above.")
+    ui:Tip(self.judgeRow.cb, "Judge the seals", "Off: the seals are kept as buffs on you and never judged. Solofarming starts with this off - the pack does not live long enough for a judgement to pay back.")
 
     ui:Tip(self.spellCB.holyShield.cb,     "Holy Shield",     "Cast right after the strike, before seals.", "Fires whenever its own cooldown is ready.")
     ui:Tip(self.spellCB.hammerOfWrath.cb,  "Hammer of Wrath", "Execute, used only at or below 20 percent target HP.")
@@ -351,6 +356,8 @@ end
 -- refresh body (paladin binding)
 -- ============================================================
 function M:RefreshBody(ui, buf)
+    -- Read through the active tab's layer, so the page shows the tab's values.
+    buf = M:TabView(buf, M)
     local function sealDD(dd, list, cur)
         cur = cur or ""
         local o = { { label = "(none)", value = "" } }
@@ -364,6 +371,7 @@ function M:RefreshBody(ui, buf)
     end
     sealDD(self.debuffDD, self.DEBUFF_SEALS, buf.seals.debuff)
     sealDD(self.damageDD, self.DAMAGE_SEALS, buf.seals.damage)
+    ui:BindCheck(self.judgeRow, buf.judgeSeals ~= false, "Judgement")
 
     local function setCB(key) ui:BindCheck(self.spellCB[key], buf.spells[key]) end
     setCB("holyStrike"); setCB("crusaderStrike")
@@ -584,6 +592,7 @@ function M:RefreshBody(ui, buf)
 
     ui:BindCheck(self.hsSoloRow, buf.useHolyShock, "Holy Shock")
     ui:BindCheck(self.reloadSoloRow, buf.healReloadCS)
+    ui:BindCheck(self.selfSoloRow, buf.soloUseFlash, "Flash of Light")
     local hsp = buf.holyShockPct or 50
     self.hsSoloRow.slider:SetValue(hsp)
     if self.hsSoloRow.slider.valText then self.hsSoloRow.slider.valText:SetText("<" .. hsp .. "%") end
@@ -596,6 +605,7 @@ function M:RefreshBody(ui, buf)
     if self.selfSoloRow.slider.valText then
         self.selfSoloRow.slider.valText:SetText(selfv > 0 and ("<" .. selfv .. "%") or "off")
     end
+    ui:SliderEnable(self.selfSoloRow.slider, buf.soloUseFlash and true or false)
     self.selfRow.slider:SetValue(selfv)
     if self.selfRow.slider.valText then
         self.selfRow.slider.valText:SetText(selfv > 0 and ("<" .. selfv .. "%") or "off")

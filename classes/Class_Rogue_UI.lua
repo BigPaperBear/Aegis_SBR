@@ -48,7 +48,8 @@ M.specTabs = {
 -- ============================================================
 function M:BuildBody(ui, parent)
     local L = ui:NewLayout(parent)
-    local function set(key) return function(v) if ui.buf then ui.buf[key] = v; ui:Refresh() end end end
+    -- Every write lands in the ACTIVE TAB's layer (Aegis_SBR:TabView).
+    local function set(key) return function(v) if ui.buf then M:TabView(ui.buf, M)[key] = v; ui:Refresh() end end end
 
     -- Grouped by FEATURE, not by spell type. The header carries the context, so
     -- each row only has to say the one thing that is specific to it - which is
@@ -83,8 +84,13 @@ function M:BuildBody(ui, parent)
     -- more to the group than to the rogue, and reading them first is how the tab
     -- says that.
     L:Header("Subtlety", "subtlety")
+    self.garroteRow = L:Row{ key = "useGarrote", label = "Garrote from stealth", spell = "Garrote", onToggle = set("useGarrote") }
+    self.vanishRow = L:Row{ key = "useVanishBurst", label = "Vanish into the burst", spell = "Vanish", onToggle = set("useVanishBurst") }
+    self.evisSubRow = L:Row{ key = "useEviscerate", label = "Eviscerate when nothing is due", spell = "Eviscerate", onToggle = set("useEviscerate") }
     self.eaRow = L:Row{ key = "useExposeArmor", label = "Expose Armor from", spell = "Expose Armor", onToggle = set("useExposeArmor"),
         slider = { key = "exposeCP", min = 1, max = 5, step = 1, suffix = "", onChange = set("exposeCP") } }
+    self.eaRefreshRow = L:Row{ label = "Expose Armor refresh under",
+        slider = { key = "exposeRefresh", min = 1, max = 15, step = 1, suffix = "s", onChange = set("exposeRefresh") } }
     self.sodRow = L:Row{ key = "useShadowOfDeath", label = "Shadow of Death from", spell = "Shadow of Death", onToggle = set("useShadowOfDeath"),
         slider = { key = "sodCP", min = 1, max = 5, step = 1, suffix = "", onChange = set("sodCP") } }
     self.markRow = L:Row{ key = "useMark", label = "Mark for Death up to", spell = "Mark for Death", onToggle = set("useMark"),
@@ -186,7 +192,7 @@ function M:BuildBody(ui, parent)
     ui:Tip(self.ripRow.cb, "Riposte", "Cast right after a parry, inside the short Riposte window. Neither spends nor builds combo points.")
     ui:Tip(self.sndRow.cb, "Slice and Dice", "Kept up: refreshed cheaply at 1 combo point, dumped with Eviscerate above that.")
     ui:Tip(self.envRow.cb, "Envenom", "Kept up the same way as Slice and Dice (Turtle ability).")
-    ui:Tip(self.renewRow.slider, "Refresh buffs at", "Seconds of remaining time at which Slice and Dice and Envenom are re-applied. Whatever is left on the buff at that moment is thrown away, so a lower value wastes fewer combo points.", "1 is the measured sweet spot: refreshes land with ~0.6s to spare and the buffs practically never drop. 2 is safer on low energy. 0 waits for the buff to lapse - efficient, but the downtime is real.")
+    ui:Tip(self.renewRow.slider, "Refresh buffs at", "Seconds of remaining time at which Slice and Dice and Envenom are re-applied - and, on the Subtlety tab, Taste for Blood by Rupture. Whatever is left on the buff at that moment is thrown away, so a lower value wastes fewer combo points.", "1 is the measured sweet spot: refreshes land with ~0.6s to spare and the buffs practically never drop. 2 is safer on low energy. 0 waits for the buff to lapse - efficient, but the downtime is real.")
     ui:Tip(self.rupRow.cb, "Rupture", "With the Assassination talent Taste for Blood it is kept up for that melee-damage BUFF (not the bleed) and takes priority over the other finishers. Without the talent it simply maintains the bleed on your target.", "The slider is its own combo-point threshold, separate from Eviscerate's on purpose: only Rupture's payoff scales with the points spent (2% damage per point), and sharing Eviscerate's higher threshold meant it never got cast at all.")
     ui:Tip(self.rupRow.slider, "Rupture at CP", "Combo points required before Rupture is cast. Lower = renewed more reliably but a weaker buff; higher = stronger buff but it may never be reached, since every buff refresh resets you to 1 point.", "Recommended: 5. A recast simply overwrites the buff at whatever combo points it was cast with, so anything below 5 risks replacing an existing 10% Taste for Blood buff with a weaker one the moment Rupture comes due.")
     ui:Tip(self.evisOnlyRow.cb, "Eviscerate only in execute", "Reserve Eviscerate for the execute phase, so every other combo point goes into maintaining your buffs instead of direct damage.", "Useful once you maintain several buffs: refreshes keep resetting your points, so a normal Eviscerate threshold is rarely reached anyway.")
@@ -199,8 +205,12 @@ function M:BuildBody(ui, parent)
     ui:Tip(self.execTTKRow.slider, "Skip if alive past", "Cancels the execute dump when the target is measurably going to live longer than this, so an elite parked at low health does not collect weak finishers.", "A brake only - it never STARTS the execute phase, and cancels only below the Eviscerate threshold, so a full-value finisher is never held back. The estimate is rough, hence one direction only.")
     ui:Tip(self.cdRow.cb, "Pop cooldowns", "Use Adrenaline Rush and Blade Flurry every press (off the global cooldown).")
     ui:Tip(self.cdEliteRow.cb, "Auto on elite", "Pop the cooldowns only against elite and boss targets.")
-    ui:Tip(self.eaRow.cb, "Expose Armor", "Kept on the target: re-applied whenever the debuff is gone. With Improved Expose Armor it reduces MORE armor than Sunder Armor, so it replaces the warrior's stack instead of competing with it, and every physical attacker on the target gains.", "It outranks every other finisher: five combo points every thirty seconds that do not go into Shadow of Death or Eviscerate. No early refresh - a target debuff has no readable time left on this client.")
+    ui:Tip(self.eaRow.cb, "Expose Armor", "Kept up the whole fight, ahead of every other finisher. The time left is read off the target (ClassicAPI) or counted from the last cast; it is re-applied under the seconds set below.", "The points are reserved for it early: once there is no longer time to spend five elsewhere and build them back before it drops - measured on this fight's own combo rate, shown as cps= in the trace - no other finisher goes out and the five points wait for the refresh line.")
+    ui:Tip(self.eaRefreshRow.slider, "Expose Armor refresh under", "Seconds left on the debuff at which it is re-applied with five points. Lower keeps more of each debuff; higher leaves more room for a late fifth point.")
     ui:Tip(self.eaRow.slider, "Expose Armor at CP", "Combo points required before the debuff is applied. Its strength scales with the points spent, so anything below 5 puts up a weaker reduction than the warrior's Sunder it is meant to replace.")
+    ui:Tip(self.garroteRow.cb, "Garrote from stealth", "The opener, and again after Vanish: from stealth and behind the target, ahead of everything else. Two combo points with Initiative. Not on a bleed-immune target - there the press goes to Hemorrhage.")
+    ui:Tip(self.vanishRow.cb, "Vanish into the burst", "While Mark for Death runs and Shadow of Death is ready: Vanish, Garrote from the new stealth, Shadow of Death at five. Preparation then hands the three back for a second round.", "Needs Flash Powder; a refused Vanish stands down for a minute.")
+    ui:Tip(self.evisSubRow.cb, "Eviscerate when nothing is due", "At five combo points with Expose Armor fresh, Rupture and Slice and Dice running and the sigil on cooldown, Eviscerate spends them. Off: the points wait.")
     ui:Tip(self.sodRow.cb, "Shadow of Death", "A sigil on the target for 6 seconds that banks a share of ALL damage the target takes, then releases it as physical damage. One minute cooldown.", "Above the buffs and Eviscerate, because those can be refreshed on any press while a missed sigil window is gone. Its value comes from outside you: the more the group hits, the more it stores.")
     ui:Tip(self.sodRow.slider, "Shadow of Death at CP", "Both the share banked and its cap scale per combo point: 1 point banks 10% up to 50% of your attack power, 5 points bank 50% up to 250%.", "5 is not a preference here. A 1-point sigil caps at a fifth of a full one, and the ability is on the same one minute cooldown either way.")
     ui:Tip(self.markRow.cb, "Mark for Death", "135% weapon damage that awards TWO combo points and cannot be dodged, blocked or parried, plus 30% attack power for the whole party for 8 seconds. Three minute cooldown.", "It is a builder, not a finisher - which is why it goes out ahead of your normal builder rather than waiting for combo points. The 8 second window is what Shadow of Death is meant to be fired into.")
@@ -220,6 +230,8 @@ end
 -- refresh body (rogue binding)
 -- ============================================================
 function M:RefreshBody(ui, buf)
+    -- Read through the active tab's layer, so the page shows the tab's values.
+    buf = M:TabView(buf, M)
     -- builder dropdown: Auto plus the builders the rogue actually knows
     local o = { { label = "Auto (spec based)", value = "" } }
     local avail = self:AvailableBuildersOf()
@@ -240,7 +252,14 @@ function M:RefreshBody(ui, buf)
 
     -- Subtlety. Two floors and one ceiling, so the value column has to say which
     -- is which - the same rule the rest of this window follows.
+    ui:BindCheck(self.garroteRow, buf.useGarrote, "Garrote")
+    ui:BindCheck(self.vanishRow, buf.useVanishBurst, "Vanish")
+    ui:BindCheck(self.evisSubRow, buf.useEviscerate ~= false, "Eviscerate")
     ui:BindCheck(self.eaRow, buf.useExposeArmor)
+    local earv = buf.exposeRefresh or 3
+    self.eaRefreshRow.slider:SetValue(earv)
+    if self.eaRefreshRow.slider.valText then self.eaRefreshRow.slider.valText:SetText("<" .. earv .. "s") end
+    ui:SliderEnable(self.eaRefreshRow.slider, buf.useExposeArmor and true or false)
     local eav = buf.exposeCP or 5
     self.eaRow.slider:SetValue(eav)
     if self.eaRow.slider.valText then self.eaRow.slider.valText:SetText(">=" .. eav) end

@@ -4,6 +4,94 @@ All notable changes to **Aegis: Single Button Rotation** (formerly **AutoRota**)
 
 ---
 
+## v1.2.35 — every tab keeps its own settings, and the Subtlety rogue plays the raid rotation
+
+### 🐛 A tab's settings were everybody's
+
+The spec tabs of the Paladin, Mage, Druid, Rogue and Shaman panels edited one set of
+settings: a switch flipped on the paladin's Solofarming page was flipped for the tank and the
+healer too. Only the hunter had layers of its own.
+
+Every tabbed panel now keeps one sparse settings layer per tab (`Aegis_SBR:TabView`): reads
+fall from the active tab's layer to the base, writes land in the tab's layer, and the
+rotation, the slash commands and the profile check all see the profile as the active tab
+does. The tab field itself and what is derived from it (the paladin's heal mode) stay on the
+base; the paladin's `spells` and `seals` records are layered key by key. Existing profiles
+carry everything on the base and empty layers, so every tab shows what it showed before and
+only its own edits diverge from it. The bubble heal's profile window is a view over the
+profile rather than a copy, which the layered profile cannot be walked with.
+
+### ✨ Rogue — the Subtlety raid rotation, ability by ability
+
+Written to the rotation an experienced Subtlety rogue plays, and measured against nine logs
+until the two matched line by line:
+
+Garrote, Hemorrhage to five, **Expose Armor**, Slice and Dice with the point Ruthlessness
+returns, Hemorrhage to five, **Rupture** (for Taste for Blood), Slice and Dice, **Mark for
+Death**, **Vanish**, Garrote from the new stealth, **Shadow of Death** at five,
+**Preparation**, and the burst again; then Expose Armor, Slice and Dice, Rupture and the sigil
+on cooldown around it.
+
+- **Expose Armor is kept up.** The time left is read off the target (ClassicAPI) or counted
+  from the last cast, and it is re-applied under the **Expose Armor refresh under** slider
+  (default 3 s). The points are reserved for it in time: once there is no longer time to
+  spend five elsewhere and build them back before it drops - the build time from the energy
+  pooled and this fight's own measured income, procs included - no other finisher goes out.
+  A missed Expose Armor (dodged, parried, refused by the global cooldown) is recognised at
+  once - the combat log line, the target's auras, and the combo points still there a beat
+  later - and re-done; the provisional thirty seconds are withdrawn.
+- **Nothing is sent into the global cooldown** (the client refuses it silently and every
+  ledger then records a cast that never happened): the press is held, the next one sends.
+- **The burst holds together.** The Mark goes out at one point when Vanish and the sigil are
+  ready, so Vanish follows at once (it needs three or fewer, Garrote adds two); the sigil
+  waits for the Mark when the Mark is ready or within twenty seconds, and is never held for
+  Taste for Blood inside the burst; Preparation only after Mark, sigil and Vanish are spent
+  and the Mark's eight seconds are over. The Mark's window is read from its own cast (the
+  buff is not readable by name on this client). Between bursts the sigil goes out on
+  cooldown.
+- **Slice and Dice** with up to "Spend at most" points (2 in the template): above that a
+  finisher first, the refresh with the point that comes back. Cheap refreshes are allowed
+  inside the reserve while Expose Armor has more than six seconds.
+- **Rupture** when Taste for Blood is under the "Refresh when under" line (the same slider
+  as Slice and Dice), ahead of the sigil only when the buff has lapsed outright, and ahead
+  of an overflow Eviscerate when it would lapse before the next five points.
+- **No idle five points at full energy:** Eviscerate when there is room before the next
+  Expose Armor (at a full bar only the normal margin), else Rupture early when Taste for
+  Blood is past half, else a Hemorrhage for the energy's sake.
+- Garrote is the opener and the post-Vanish strike, not on Mechanical or Elemental targets
+  (a bleed); Rupture is cast on those regardless, Taste for Blood does not need it to land.
+  A refused Vanish (no Flash Powder) stands down for a minute. The core no longer starts the
+  auto-attack from stealth, which broke the stealth the opener needs.
+- New `subtlety` template; switches **Garrote from stealth**, **Vanish into the burst**,
+  **Eviscerate when nothing is due**; Ghostly Strike off by default.
+
+### 🔧 Paladin — Solofarming plays by time, not by size
+
+- Self-healing by its own engine: **Holy Shock** first (instant, off cooldown, under its
+  line), **Holy Light** under its line when the Shock is on cooldown, **Flash of Light** only
+  when switched on (off by default - in defensive gear it barely moves the bar). A cast-time
+  heal under a fifth of the deficit is skipped and the press goes back to fighting (a log had
+  rank-1 Holy Lights healing fifty of two thousand). The heal in flight is credited, which
+  ends the double casts at the end of a cast bar.
+- **Seal first** in Solofarming: a missing Seal of Wisdom outranks the heal, and every pick
+  checks its cost - a Consecration sent twenty times at a tenth of its cost held the seal off
+  for five seconds.
+- **Judge the seals** is a switch in the *Seals* section: off, the seals are buffs on the
+  paladin. Solofarming starts with it off. Mana and HP management are gone from the
+  Solofarming tab and inactive there. Strikes in Solofarming stay what they were: Crusader
+  Strike only to reset Holy Shock with Blessed Strikes, nothing else.
+- Under the bubble, Solofarming heals with Holy Light (Holy Shock when it cannot afford one).
+- Tank: a third both-on strike strategy, **HS, then alternate** (`/sbr strike alternate`).
+- Healer: **Judge onto the mob** and **Keep up while swinging** are two seals (see v1.2.30).
+
+### 🔧 Smaller
+
+- Every send is in the log (`-> Spell (reason)`), for every class; the paladin's cost
+  refusals too. The press log holds 6000 lines, so a raid fight's start survives to the
+  reload that writes it.
+
+---
+
 ## v1.2.34 — locked out, so wand
 
 ### 🐛 Warlock: a spell lock left the rotation standing

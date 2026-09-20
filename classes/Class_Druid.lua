@@ -34,6 +34,10 @@ M.uiTitle = "Druid"
 -- Rotate runs under Aegis_SBR:Preview without casting (see Pick/Later).
 M.previewReady = true
 M.uiHeight = 794
+
+-- Each panel tab keeps its own settings layer (Aegis_SBR:TabView): a change
+-- made on one tab stays on that tab.
+M.tabLayers = { field = "form", keys = { "cat", "bear", "caster", "tree" } }
 -- Auto-attack is managed per form in this module instead of by the core, so a
 -- white swing is only started in Cat/Bear (where you melee) and never in
 -- caster/Moonkin (where you are casting). See EnsureMeleeSwing below.
@@ -1357,14 +1361,14 @@ end
 -- ============================================================
 function M:HandleCommand(cmd, t)
     if cmd == "aoe" then
-        local cfg = Aegis_SBR:GetActiveProfile()
+        local cfg = M:TabView(Aegis_SBR:GetActiveProfile(), M)
         if not cfg then msgOut("no profile active.", 1, 0.5, 0.3); return true end
         cfg.aoeSwipe = not cfg.aoeSwipe
         msgOut("Swipe " .. (cfg.aoeSwipe and "on (AoE)" or "off") .. ".")
         return true
     end
     if cmd == "weave" then
-        local cfg = Aegis_SBR:GetActiveProfile()
+        local cfg = M:TabView(Aegis_SBR:GetActiveProfile(), M)
         if not cfg then msgOut("no profile active.", 1, 0.5, 0.3); return true end
         local a = string.lower(t[2] or "")
         if a == "on" then cfg.weaveDamage = true
@@ -1374,7 +1378,7 @@ function M:HandleCommand(cmd, t)
         return true
     end
     if cmd == "style" then
-        local cfg = Aegis_SBR:GetActiveProfile()
+        local cfg = M:TabView(Aegis_SBR:GetActiveProfile(), M)
         local style = self.styleAlias[string.lower(t[2] or "")]
         if cfg and style then
             cfg.catStyle = style
@@ -1387,7 +1391,7 @@ function M:HandleCommand(cmd, t)
         return true
     end
     if cmd == "form" then
-        local cfg = Aegis_SBR:GetActiveProfile()
+        local cfg = M:TabView(Aegis_SBR:GetActiveProfile(), M)
         local form = self.formAlias[string.lower(t[2] or "")]
         if cfg and form then
             cfg.form = form
