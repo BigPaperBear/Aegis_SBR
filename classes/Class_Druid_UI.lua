@@ -22,7 +22,8 @@ M.specTabs = {
 -- ============================================================
 function M:BuildBody(ui, parent)
     local L = ui:NewLayout(parent)
-    local function set(key) return function(v) if ui.buf then ui.buf[key] = v; ui:Refresh() end end end
+    -- Every write lands in the ACTIVE TAB's layer (Aegis_SBR:TabView).
+    local function set(key) return function(v) if ui.buf then M:TabView(ui.buf, M)[key] = v; ui:Refresh() end end end
 
     L:Header("Cat Form (DPS)", "cat")
     self.styleDD = L:Dropdown("catStyle", "Style", 170, set("catStyle"))
@@ -173,6 +174,8 @@ end
 -- refresh body (druid binding)
 -- ============================================================
 function M:RefreshBody(ui, buf)
+    -- Read through the active tab's layer, so the page shows the tab's values.
+    buf = M:TabView(buf, M)
 
     local styleOpts = {
         { label = "Automatic",          value = "auto"  },

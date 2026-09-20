@@ -22,7 +22,11 @@
 
 local M = Aegis_SBR:NewClassModule("ROGUE")
 M.uiTitle = "Rogue"
-M.uiHeight = 574
+M.uiHeight = 678
+
+-- Each panel tab keeps its own settings layer (Aegis_SBR:TabView): a change
+-- made on one tab stays on that tab.
+M.tabLayers = { field = "spec", keys = { "starter", "assassination", "combat", "subtlety" } }
 -- Rotate runs under Aegis_SBR:Preview without casting (see Pick/Later).
 M.previewReady = true
 
@@ -73,6 +77,9 @@ local BUFF_RENEW = 1
 -- often. Renewing from roughly half the buff's life onward makes sure such a
 -- moment falls inside the window instead of after the buff has already lapsed.
 local TFB_RENEW = 10
+-- Expose Armor is re-applied under this much time left unless the profile
+-- says otherwise (the slider on the Subtlety tab).
+local EXPOSE_REFRESH_DEFAULT = 3.0
 
 -- Builder universe, used by the UI to offer only learned ones
 -- Deliberately WITHOUT Ghostly Strike. This list answers "which builder do you
@@ -103,6 +110,14 @@ M.templates = {
         useSurpriseAttack = true,
         useExecute = false, executeHpPct = 10, executeTTK = 4, executeMinCP = 1, refreshMaxCP = 5, evisExecuteOnly = false, ruptureCP = 3,
         cpFinish = 5, buffRenew = 1, useColdBlood = false, popCDs = false, autoCDElite = true,
+    },
+    subtlety = {  -- raid support: Expose Armor kept up, the Mark/Vanish/Garrote/Sigil burst
+        spec = "subtlety", builder = "Hemorrhage", useSnd = true, useEnvenom = false, useRupture = true, useRiposte = false,
+        useSurpriseAttack = false, useGarrote = true, useVanishBurst = true, useEviscerate = true,
+        useExposeArmor = true, exposeCP = 5, useShadowOfDeath = true, sodCP = 5, useMark = true, markMaxCP = 3,
+        usePreparation = true, useGhostly = false,
+        useExecute = false, executeHpPct = 10, executeTTK = 4, executeMinCP = 1, refreshMaxCP = 2, evisExecuteOnly = false, ruptureCP = 5,
+        cpFinish = 5, buffRenew = 1, useColdBlood = false, popCDs = false, autoCDElite = false,
     },
 }
 
@@ -154,7 +169,7 @@ function M:NormalizeProfile(c)
     -- It has to happen HERE and not further down with the other Subtlety fields:
     -- by then the field is no longer nil and an override would never fire.
     if c.refreshMaxCP == nil then
-        c.refreshMaxCP = (c.spec == "subtlety") and 1 or 5
+        c.refreshMaxCP = 5
     end
     -- Retired: a combo point FLOOR for refreshes. Measured over 1355 presses it
     -- pushed Envenom uptime from 84% down to 61% and pinned the rotation at
@@ -220,6 +235,15 @@ function M:NormalizeProfile(c)
     -- simply the better press, which is all the "hemo and ghostly" in the
     -- described rotation ever was - a cooldown coming back, not an alternation.
     if c.useGhostly == nil then c.useGhostly = sub end
+    -- Garrote from stealth: the Subtlety opener (two combo points with
+    -- Initiative, plus Serrated Blades on the bleed).
+    if c.useGarrote == nil then c.useGarrote = sub end
+    -- The burst: Mark for Death, Vanish, Garrote from the new stealth, Shadow
+    -- of Death at five - then Preparation and the same again.
+    if c.useVanishBurst == nil then c.useVanishBurst = sub end
+    -- Eviscerate only as the overflow finisher when nothing else is due.
+    if c.useEviscerate == nil then c.useEviscerate = true end
+    if c.exposeRefresh == nil then c.exposeRefresh = EXPOSE_REFRESH_DEFAULT end
     if c.popCDs == nil then c.popCDs = false end
     if c.autoCDElite == nil then c.autoCDElite = false end
     -- old keys from any earlier format are dropped silently
@@ -353,7 +377,161 @@ end
 -- single press - which would spend every combo point the rogue ever earns on
 -- re-applying a debuff that was already there. The stamp is written by Rotate,
 -- never by Decide, which must stay free of side effects.
-local EXPOSE_RETRY = 25
+-- Only the beat in which a cast that cannot be read back yet would be
+-- re-sent; the thirty seconds are the ledger's job now (ExposeLeft). It was
+-- 25, and a new mob with the same NAME as the last (the id falls back to the
+-- name when the GUID cannot be read) inherited the whole window - the first
+-- five points then went into Shadow of Death instead of Expose Armor.
+local EXPOSE_RETRY = 3
+-- Expose Armor lasts 30 seconds (tooltip, rank 5). Written to the debuff
+-- ledger on every cast, so the time left is known on any client; where
+-- ClassicAPI reads the real remaining time off the target, that wins.
+local EXPOSE_DURATION = 30
+-- Re-applied under this much time left: the "Expose Armor refresh under"
+-- slider on the Subtlety tab (exposeRefresh), and nothing else. An earlier
+-- version refreshed as soon as the reserve had five points, which put the
+-- debuff back at thirteen seconds against a one second setting - a switch
+-- the rotation walks around is worse than no switch.
+
+-- Seconds per combo point assumed until the fight has measured its own
+-- (see NoteComboRate): Hemorrhage costs 30 energy at 10 energy a second.
+local CP_SECS_DEFAULT = 3.0
+-- Margin on the rebuild estimate: the energy for Expose Armor itself after
+-- the last builder, and a press or two.
+local CP_RESERVE_MARGIN = 2.5
+
+-- Seconds left on Expose Armor for this target, or nil when it is not up.
+-- Mechanical and Elemental creatures take no bleed: Garrote is a bleed and
+-- is not opened with on them (the press from stealth goes to Hemorrhage).
+-- Rupture is still cast on them with Taste for Blood - the tooltip grants the
+-- buff "regardless of successful application". Cached per target; an unknown
+-- type answers "not immune".
+function M:TargetIsBleedImmune()
+    local id = self:TargetId()
+    if id ~= self.bleedTypeId then
+        local t = UnitCreatureType("target")
+        self.bleedTypeId = id
+        self.bleedImmune = (t == "Mechanical" or t == "Elemental")
+    end
+    return self.bleedImmune and true or false
+end
+
+-- In stealth? The client's own flag where it exists, the buff otherwise.
+function M:Stealthed()
+    if IsStealthed then return IsStealthed() and true or false end
+    return self:HasBuff("Stealth") or self:HasBuff("Vanish")
+end
+
+-- A cast the client took can still be dodged or parried, and the ledger
+-- written on the send then claims thirty seconds the target never carried -
+-- reported as Expose Armor gone from the mob for a minute while the trace
+-- counted it down twice. Two answers: the miss line in the combat log clears
+-- the ledger at once (see the frame at the bottom), and where the target's
+-- auras can be read at all, a debuff not readable a beat after the cast is
+-- not there, whatever the ledger says.
+local EXPOSE_SETTLE = 1.5
+
+function M:ExposeLeft()
+    local live = Aegis_SBR.TargetDebuffRemaining and Aegis_SBR:TargetDebuffRemaining("Expose Armor")
+    if live and live > 0 then return live end
+    local id = self:TargetId()
+    local rec = id and Aegis_SBR.debuffLedger and Aegis_SBR.debuffLedger[id .. "|Expose Armor"]
+    if rec and rec.expires then
+        local left = rec.expires - GetTime()
+        if left <= 0 then return nil end
+        -- Readable target, cast settled, nothing there: it missed.
+        if Aegis_SBR.Capability and Aegis_SBR:Capability("auras")
+            and self.exposeT and (GetTime() - self.exposeT) > EXPOSE_SETTLE
+            and not self:TargetDebuffUp("Expose Armor", "Ability_Warrior_Riposte") then
+            Aegis_SBR.debuffLedger[id .. "|Expose Armor"] = nil
+            return nil
+        end
+        return left
+    end
+    -- Readable on the target but with no time recorded (applied before the
+    -- ledger knew this mob): treat it as fresh rather than as missing.
+    if self:TargetDebuffUp("Expose Armor", "Ability_Warrior_Riposte") then return EXPOSE_DURATION end
+    return nil
+end
+
+-- How long this fight has been taking per combo point, learned as it goes:
+-- every combo point gained from a builder is timed, and the average is a
+-- running one so a lucky Honor Among Thieves streak or a dodge does not set
+-- the number for good. Called from Rotate with the count before and after.
+function M:NoteComboRate(before, after, at)
+    if not before or not after then return end
+    if after > before and self.cpLastGainAt then
+        local per = (at - self.cpLastGainAt) / (after - before)
+        if per > 0.3 and per < 15 then
+            self.cpSecs = self.cpSecs and (self.cpSecs * 0.7 + per * 0.3) or per
+        end
+    end
+    if after ~= before then self.cpLastGainAt = at end
+end
+
+function M:ComboSecs()
+    return self.cpSecs or CP_SECS_DEFAULT
+end
+
+-- The rate the reserve plans with: never faster than energy alone allows
+-- (thirty energy a builder, ten a second), whatever a lucky streak measured.
+-- Two logs had the estimate dip to 1.5-2.0 s on Honor Among Thieves procs,
+-- the points spent on that promise, and the fifth point back two seconds
+-- after the debuff had dropped.
+local CP_SECS_FLOOR = 2.5
+function M:ReserveSecs()
+    local c = self:ComboSecs()
+    if c < CP_SECS_FLOOR then c = CP_SECS_FLOOR end
+    return c
+end
+
+-- Are the combo points spoken for by the next Expose Armor?
+--
+-- The debuff has to be up the whole fight, and it costs five points every
+-- thirty seconds. So from the moment there is no longer time to spend five
+-- points elsewhere AND build them back (Ruthlessness hands one straight back,
+-- so four to build) before it drops, every other finisher stands down and
+-- the points are pooled for it. What "time to build" means is measured on the
+-- fight itself (ComboSecs), not assumed.
+-- Seconds to build `n` combo points from `energy` pooled: one global
+-- cooldown per builder, and the energy the builders need beyond what is
+-- pooled comes in at ten a second. A measured rate cannot say this - a full
+-- bar builds four points in four seconds, an empty one in twelve - and a
+-- log had five points held at a hundred energy for six seconds because the
+-- rate said "not enough time". Procs (Honor Among Thieves, the set's energy
+-- return) only make this faster, so it errs on the safe side.
+--
+-- The energy comes in at the rate this fight has shown, not at the bare ten
+-- a second: the measured seconds per point (ComboSecs) carry the procs -
+-- Honor Among Thieves, an energy-return set - as an effective income, and
+-- the builders' global cooldowns run while it accrues (they overlap, they do
+-- not add). A version that summed cooldowns and regeneration at ten a second
+-- reserved the points at 23 seconds left and held everything for 14 - Slice
+-- and Dice down, the sigil and the Mark waiting.
+function M:BuildSecs(n, energy)
+    local cost = Aegis_SBR:SpellCost("Hemorrhage") or 30
+    local income = cost / self:ComboSecs()          -- energy per second, as played
+    if income < 10 then income = 10 end
+    local short = n * cost - (energy or 0)
+    if short < 0 then short = 0 end
+    local byEnergy = short / income
+    local byGcd = n * 1.0
+    if byEnergy > byGcd then return byEnergy end
+    return byGcd
+end
+
+function M:ExposeReserve(cfg, cp)
+    if not cfg.useExposeArmor or not self:KnowsSpell("Expose Armor") then return false end
+    if self:TalentRank(TALENT_IEA) < 1 then return false end
+    local left = self:ExposeLeft()
+    if not left then return true end                 -- missing: the next five are its
+    -- After a five-point finisher Ruthlessness hands one back: four to build,
+    -- from what is left of the energy after that finisher.
+    local energy = (UnitMana("player") or 0) - 30
+    local need = self:BuildSecs(4, energy) + CP_RESERVE_MARGIN
+    return left <= need
+end
+
 function M:ExposeDue(cfg)
     if not cfg.useExposeArmor then return false end
     if not self:KnowsSpell("Expose Armor") then return false end
@@ -362,8 +540,13 @@ function M:ExposeDue(cfg)
     -- raid did not already have. Suppress-only: this can stop a cast, never add
     -- one, so it cannot starve anything the way a widened gate could.
     if self:TalentRank(TALENT_IEA) < 1 then return false end
-    if self:TargetDebuffUp("Expose Armor", "Ability_Warrior_Riposte") then return false end
-    if self.exposeT and self.exposeId and self.exposeId == self:TargetId()
+    local left = self:ExposeLeft()
+    if left and left > (cfg.exposeRefresh or EXPOSE_REFRESH_DEFAULT) then return false end
+    -- The retry throttle only where nothing can be read: with the debuff
+    -- readable, "not there" is the answer and a missed cast is re-done at
+    -- once rather than after a thirty second guess.
+    local readable = Aegis_SBR.Capability and Aegis_SBR:Capability("auras")
+    if not readable and self.exposeT and self.exposeId and self.exposeId == self:TargetId()
         and (GetTime() - self.exposeT) < EXPOSE_RETRY then
         return false
     end
@@ -377,12 +560,21 @@ end
 -- the buff that is still up would throw the reset away. That is exactly what
 -- the player who described this rotation meant by "wait for previous Mark to
 -- end to do it again".
-function M:MarkReady(cfg, cp)
+function M:MarkReady(cfg, cp, builder)
     if not cfg.useMark then return false end
     if not self:KnowsSpell("Mark for Death") then return false end
     if not self:OwnCDReady("Mark for Death") then return false end
     if cp > (cfg.markMaxCP or 3) then return false end
     if self:BuffTime("Mark for Death") > 0 then return false end
+    if self.markSentAt and (GetTime() - self.markSentAt) < 8 and not self:OwnCDReady("Mark for Death") then return false end
+    -- Hemorrhage first, then the Mark: the opener order the spec is played
+    -- in (Garrote, Hemorrhage, Mark for Death, Expose Armor at five), and the
+    -- Hemorrhage debuff then covers the Mark's own strike. Mid-fight the
+    -- debuff is simply up, so this costs nothing there.
+    if builder == "Hemorrhage" and self:KnowsSpell("Hemorrhage")
+        and not self:TargetDebuffUp("Hemorrhage", "Spell_Shadow_LifeDrain") then
+        return false
+    end
     return true
 end
 
@@ -503,6 +695,7 @@ function M:FinisherPlan(cfg, cp, spell, reason, extras)
 end
 
 function M:Decide(cfg, tracing)
+    if cfg.spec == "subtlety" then return self:DecideSubtlety(cfg, tracing) end
     local cls = UnitClassification("target")
     local isElite = (cls == "worldboss" or cls == "elite" or cls == "rareelite")
 
@@ -594,7 +787,8 @@ function M:Decide(cfg, tracing)
             .. " cb=" .. (cfg.useColdBlood and (self:KnowsSpell("Cold Blood")
                 and (self:OwnCDReady("Cold Blood") and "rdy" or "cd") or "?") or "-")
             .. " elite=" .. (isElite and "Y" or "N")
-            .. (cfg.useExposeArmor and (" ea=" .. (self:ExposeDue(cfg) and "due" or "up")) or "")
+            .. (cfg.useExposeArmor and (" ea=" .. (self:ExposeDue(cfg) and "due" or (self:ExposeLeft() and string.format("%.1fs", self:ExposeLeft()) or "up"))
+                .. (self:ExposeReserve(cfg, cp) and "/reserve" or "") .. " cps=" .. string.format("%.1f", self:ComboSecs())) or "")
             .. (cfg.useShadowOfDeath and (" sod=" .. (self:KnowsSpell("Shadow of Death")
                 and (self:OwnCDReady("Shadow of Death") and "rdy" or "cd") or "?")) or "")
             .. (cfg.useMark and (" mark=" .. (self:KnowsSpell("Mark for Death")
@@ -616,6 +810,18 @@ function M:Decide(cfg, tracing)
             .. ((cfg.useSurpriseAttack and self:KnowsSpell("Surprise Attack")) and ("  SurpriseAttack=R" .. self:MaxRank("Surprise Attack")) or ""))
     end
 
+    -- P0 Garrote from stealth: the opener. Requires stealth and being behind
+    -- the target; Initiative makes it two combo points and Serrated Blades
+    -- adds to the bleed. A definite "not behind" falls through to the normal
+    -- builder rather than a refusal; "cannot tell" lets it go out.
+    if cfg.useGarrote and self:KnowsSpell("Garrote") and self:Stealthed()
+        and Aegis_SBR:PositionAllows("behind") then
+        if not Aegis_SBR:CanAfford("Garrote") then
+            return plan(nil, "pooling energy for Garrote", extras)
+        end
+        return plan("Garrote", "opener from stealth", extras)
+    end
+
     -- P1 Riposte, combo point independent, only inside the parry window
     if cfg.useRiposte and self:KnowsSpell("Riposte") and now < (self.riposteExpiry or 0) then
         return plan("Riposte", "parry window open", extras)
@@ -635,7 +841,7 @@ function M:Decide(cfg, tracing)
     -- Nothing a normal builder does competes with that, so it never waits its
     -- turn. Its own gate keeps it off the press when the two points it awards
     -- would run into the cap.
-    if self:MarkReady(cfg, cp) and Aegis_SBR:CanAfford("Mark for Death") then
+    if self:MarkReady(cfg, cp, builder) and Aegis_SBR:CanAfford("Mark for Death") then
         return plan("Mark for Death", "party cooldown, " .. cp .. " CP", extras)
     end
 
@@ -681,7 +887,20 @@ function M:Decide(cfg, tracing)
         if not Aegis_SBR:CanAfford("Expose Armor") then
             return plan(nil, "pooling energy for Expose Armor, " .. cp .. " CP", extras)
         end
-        return plan("Expose Armor", "armor debuff missing, " .. cp .. " CP", extras)
+        local left = self:ExposeLeft()
+        return plan("Expose Armor", (left and string.format("%.1fs left", left) or "armor debuff missing") .. ", " .. cp .. " CP", extras)
+    end
+
+    -- P2b' The points are reserved for the next Expose Armor (see
+    -- ExposeReserve): no other finisher until it has gone out. Below five,
+    -- build; at five, pool - the next press inside the refresh window casts it.
+    if self:ExposeReserve(cfg, cp) then
+        local left = self:ExposeLeft()
+        local why = string.format("Expose Armor in %s, %.1fs per CP", left and string.format("%.1fs", left) or "?", self:ComboSecs())
+        if cp >= (cfg.exposeCP or 5) then
+            return plan(nil, "holding " .. cp .. " CP for " .. why, extras)
+        end
+        return plan(builder, "building for " .. why, extras)
     end
 
     -- P2c Shadow of Death, above the maintained buffs.
@@ -756,8 +975,346 @@ function M:Decide(cfg, tracing)
     return plan(builder, "building to " .. cpEvis .. " CP", extras)
 end
 
+-- Vanish stands down this long after the client refused it (no Flash Powder,
+-- or a stealth the fight will not allow).
+local VANISH_BACKOFF = 60
+-- The Mark waits for the sigil when the sigil is this close to coming back,
+-- so the two go out as one burst; further away than this the Mark goes alone.
+local BURST_WAIT = 20
+
+-- ============================================================
+-- Subtlety, the raid rotation - as played by a Subtlety rogue in a forty man
+-- raid and written down for us, ability by ability:
+--
+--   Garrote, Hemo Hemo Hemo, Expose Armor, Slice and Dice, Hemo Hemo, (tea,)
+--   Hemo Hemo, Rupture, Slice and Dice, Mark for Death, Vanish, Garrote,
+--   Shadow of Death, Preparation, Mark for Death, Vanish, Garrote, Shadow of
+--   Death, Slice and Dice, Hemo x4, Expose Armor, Slice and Dice, and so on.
+--
+-- On a bleed-immune target the same without Garrote (Hemorrhage breaks the
+-- stealth Vanish gave, which is still used for the shield and the aggro
+-- reset), and Rupture still goes out for Taste for Blood.
+--
+-- Which is the priority list below. Expose Armor is kept up ahead of every
+-- other finisher, with the combo points reserved for it in time (see
+-- ExposeReserve) - except inside the burst, where the Mark for Death buff is
+-- running and the Sigil goes out regardless, as the rotation above does.
+-- Slice and Dice is refreshed with whatever points are on hand, which after a
+-- five-point finisher is the one Ruthlessness hands back. Eviscerate only
+-- when nothing else is due, and only when switched on.
+function M:DecideSubtlety(cfg, tracing)
+    local cls = UnitClassification("target")
+    local isElite = (cls == "worldboss" or cls == "elite" or cls == "rareelite")
+    local now = GetTime()
+    local cp = GetComboPoints("player", "target")
+
+    local builder = cfg.builder
+    if builder == "" or not self:KnowsSpell(builder) then
+        builder = self:KnowsSpell("Hemorrhage") and "Hemorrhage" or "Sinister Strike"
+    end
+    if cfg.useGhostly and self:KnowsSpell("Ghostly Strike") and self:OwnCDReady("Ghostly Strike") then
+        builder = "Ghostly Strike"
+    end
+
+    local extras
+    if cfg.popCDs or (cfg.autoCDElite and isElite) then
+        extras = {}
+        if self:KnowsSpell("Blade Flurry") and self:OwnCDReady("Blade Flurry") then
+            table.insert(extras, "Blade Flurry")
+        end
+        if table.getn(extras) == 0 then extras = nil end
+    end
+
+    local immune = self:TargetIsBleedImmune()
+    local stealthed = self:Stealthed()
+    -- The Mark's eight seconds. The buff is not readable by that name on the
+    -- player on this client (two logs: Vanish never fired, the Mark read as
+    -- "not up" a quarter second after its own cast), so the cast itself is
+    -- the evidence: sent within eight seconds and the cooldown running.
+    local markUp = self:BuffTime("Mark for Death") > 0
+        or (self.markSentAt and (now - self.markSentAt) < 8
+            and self:KnowsSpell("Mark for Death") and not self:OwnCDReady("Mark for Death")) or false
+    local useSnd = cfg.useSnd and self:KnowsSpell("Slice and Dice")
+    local sndLeft = useSnd and self:BuffTime("Slice and Dice") or 0
+    local sndDue = useSnd and sndLeft <= (cfg.buffRenew or BUFF_RENEW)
+    local useRup = cfg.useRupture and self:KnowsSpell("Rupture")
+    -- Rupture is due when Taste for Blood is under the same "Refresh when
+    -- under" line as Slice and Dice - the slider on the panel, not the
+    -- assassination path's ten second half-life: that re-cast Rupture every
+    -- twelve seconds of a twenty-two second buff, five points each time.
+    local rupDue = useRup and ((self:TalentRank(TALENT_TASTE) > 0 and self:TasteLeft() <= (cfg.buffRenew or BUFF_RENEW))
+        or (self:TalentRank(TALENT_TASTE) == 0 and self:RuptureDue()))
+    local sodReady = cfg.useShadowOfDeath and self:KnowsSpell("Shadow of Death") and self:OwnCDReady("Shadow of Death")
+    local eaDue = self:ExposeDue(cfg)
+    -- Inside the burst (the Mark running) the reserve is suspended: the Sigil
+    -- goes out, Expose Armor is re-applied when its window comes.
+    local reserve = (not markUp) and self:ExposeReserve(cfg, cp)
+    local eaLeft = self:ExposeLeft()
+
+    -- Vanish refused since the last try (no reagent, most likely): stand down.
+    if self.vanishAt and Aegis_SBR.SpellRefusedAnySince and Aegis_SBR:SpellRefusedAnySince("Vanish", self.vanishAt) then
+        self.vanishAt = nil
+        self.vanishBlockedUntil = now + VANISH_BACKOFF
+    end
+    local vanishOK = cfg.useVanishBurst and self:KnowsSpell("Vanish") and self:OwnCDReady("Vanish")
+        and now >= (self.vanishBlockedUntil or 0)
+
+    if tracing and self:Tracing() then
+        self:Trace("sub cp=" .. cp .. " build=" .. builder
+            .. " stealth=" .. (stealthed and "Y" or "n")
+            .. " immune=" .. (immune and "Y" or "n")
+            .. " ea=" .. (eaLeft and string.format("%.1fs", eaLeft) or "none") .. (eaDue and "/due" or "") .. (reserve and "/reserve" or "")
+            .. " cps=" .. string.format("%.1f", self:ComboSecs())
+            .. " snd=" .. (useSnd and string.format("%.1fs", sndLeft) or "-")
+            .. " tfb=" .. (useRup and string.format("%.0fs", self:TasteLeft()) or "-")
+            .. " sod=" .. (cfg.useShadowOfDeath and (sodReady and "rdy" or "cd") or "-")
+            .. " mark=" .. (cfg.useMark and (self:OwnCDReady("Mark for Death") and "rdy" or "cd") or "-") .. (markUp and "/up" or "")
+            .. " vanish=" .. (cfg.useVanishBurst and (vanishOK and "rdy" or "cd") or "-")
+            .. " prep=" .. (self:PreparationReady(cfg) and "Y" or "n")
+            .. " en=" .. (UnitMana("player") or 0)
+            .. " hp=" .. string.format("%.0f%%", self:TargetHPPct()))
+    end
+
+    -- P0 Garrote from stealth (the opener, and again after Vanish). Not on a
+    -- bleed-immune target, and only from behind; there the press goes to the
+    -- builder, which breaks the stealth as the rotation intends.
+    if stealthed and cfg.useGarrote and self:KnowsSpell("Garrote") and not immune
+        and Aegis_SBR:PositionAllows("behind") then
+        -- The tooltip's thirty already carries Dirty Deeds (fifty untalented);
+        -- a version that took twenty more off sent Garrote at nine energy,
+        -- refused nine times in a row, and lost two seconds of the stealth.
+        if not Aegis_SBR:CanAfford("Garrote") then
+            return plan(nil, "pooling energy for Garrote", extras)
+        end
+        return plan("Garrote", "opener from stealth", extras)
+    end
+
+    -- The Expose Armor sent a moment ago is not confirmed yet (see Rotate):
+    -- no other finisher may take its points in the meantime. A log had the
+    -- send refused by the global cooldown and Rupture spending the five
+    -- points a quarter second later.
+    if self.exposeCheck and cp >= (cfg.exposeCP or 5) then
+        return plan(nil, "confirming Expose Armor", extras)
+    end
+
+    -- P1 Expose Armor, ahead of every other finisher. Inside the reserve the
+    -- five points have no other use, so it goes out the moment they are
+    -- there rather than at the last two seconds: a log showed five points
+    -- and a full energy bar held for six seconds - forty energy regenerated
+    -- into nothing - to save six seconds of a thirty second debuff.
+    if eaDue and cp >= (cfg.exposeCP or 5) and cfg.useExposeArmor
+        and self:KnowsSpell("Expose Armor") and self:TalentRank(TALENT_IEA) >= 1 then
+        if not Aegis_SBR:CanAfford("Expose Armor") then
+            return plan(nil, "pooling energy for Expose Armor, " .. cp .. " CP", extras)
+        end
+        return plan("Expose Armor", (eaLeft and string.format("%.1fs left", eaLeft) or "armor debuff missing") .. ", " .. cp .. " CP", extras)
+    end
+
+    -- The burst is Mark, Vanish, Garrote, sigil - in that order. So the sigil
+    -- waits for the Mark whenever the Mark is ready or about to be (within
+    -- BURST_WAIT), and for Taste for Blood as the Mark does; alone it only
+    -- goes out when the Mark is far away. A log had the sigil spent early on
+    -- its own, so the Mark that followed had nothing to burst with and
+    -- Preparation fired straight after it.
+    local tfbWait = useRup and self:TalentRank(TALENT_TASTE) > 0 and self:TasteLeft() <= 0
+    local markSoon = false
+    if cfg.useMark and self:KnowsSpell("Mark for Death") and not markUp then
+        markSoon = self:OwnCDReady("Mark for Death") or ((Aegis_SBR:OwnCDLeft("Mark for Death") or 0) <= BURST_WAIT)
+    end
+    -- The burst stays open for a while after the Mark: Vanish, Garrote and
+    -- the points to five take longer than the Mark's eight seconds, and the
+    -- sigil is still the burst's finisher then - a log had it held for Taste
+    -- for Blood at that moment and lost to the next Expose Armor.
+    local burstOpen = markUp or (self.markSentAt and (now - self.markSentAt) < 20
+        and self:KnowsSpell("Mark for Death") and not self:OwnCDReady("Mark for Death"))
+    -- Held for the Mark only. It used to wait for Taste for Blood as well,
+    -- and between bursts that never came true at a five-point moment: Taste
+    -- for Blood runs 22 seconds, Expose Armor 30, the points come every ten -
+    -- a log had the sigil ready for a hundred seconds and every five points
+    -- going to Rupture, Expose Armor or Eviscerate around it.
+    local sodHold = markSoon and not burstOpen
+
+    -- P2a Rupture ahead of the sigil only when Taste for Blood has lapsed
+    -- outright: ten percent of melee damage for its whole duration outranks
+    -- one sigil, a mere refresh does not.
+    -- Never inside the burst: there the five points are the sigil's (a log
+    -- had Taste for Blood lapse exactly as the Garrote after Vanish landed,
+    -- and Rupture took the burst's points).
+    if not reserve and not burstOpen and rupDue and tfbWait and cp >= (cfg.ruptureCP or 5) then
+        if not Aegis_SBR:CanAfford("Rupture") then
+            return plan(nil, "pooling energy for Rupture, " .. cp .. " CP", extras)
+        end
+        return plan("Rupture", "Taste for Blood gone, " .. cp .. " CP", extras)
+    end
+
+    -- P2 Shadow of Death at five, the burst's finisher.
+    if not reserve and sodReady and not sodHold and cp >= (cfg.sodCP or 5) then
+        if not Aegis_SBR:CanAfford("Shadow of Death") then
+            return plan(nil, "pooling energy for Shadow of Death, " .. cp .. " CP", extras)
+        end
+        return plan("Shadow of Death", "sigil, " .. cp .. " CP", extras)
+    end
+
+    -- P3 Rupture at five for Taste for Blood - on an immune target too, the
+    -- buff does not need the bleed to land.
+    if not reserve and rupDue and cp >= (cfg.ruptureCP or 5) then
+        if not Aegis_SBR:CanAfford("Rupture") then
+            return plan(nil, "pooling energy for Rupture, " .. cp .. " CP", extras)
+        end
+        return plan("Rupture", "Taste for Blood due, " .. cp .. " CP", extras)
+    end
+
+    -- P4 Slice and Dice with the point Ruthlessness returned after a finisher
+    -- - up to "Spend at most" points. Above that a finisher is closer than a
+    -- refresh: five points go into Rupture or the sigil first, and Slice and
+    -- Dice takes the point that comes back (a log had it refreshed with four
+    -- points, twice, and Rupture waited).
+    local sndOK = (not reserve) or (cp <= 2 and eaLeft and eaLeft > 6)
+    if sndOK and sndDue and cp >= 1 and cp <= (cfg.refreshMaxCP or 5) then
+        if not Aegis_SBR:CanAfford("Slice and Dice") then
+            return plan(nil, "pooling energy for Slice and Dice, " .. cp .. " CP", extras)
+        end
+        return plan("Slice and Dice", string.format("%.1fs left, %d CP", sndLeft, cp), extras)
+    end
+
+    -- P5 Vanish into the burst: the Mark is running, the Sigil is ready, and
+    -- the points are low enough for the Garrote that follows.
+    if vanishOK and markUp and sodReady and cp <= (cfg.markMaxCP or 3)
+        and not stealthed and UnitAffectingCombat("player") then
+        return plan("Vanish", "burst: Garrote and the sigil next", extras)
+    end
+
+    -- P6 Preparation once the Mark and the sigil are both on cooldown, so the
+    -- burst can be run again at once. Vanish is not waited for: a Vanish still
+    -- ready loses nothing to the reset, and waiting for it deadlocked - Vanish
+    -- waits for the sigil, the reset waited for Vanish (seen in a log: the
+    -- reset stood ready for forty seconds and never went out).
+    local vanishSpent = not cfg.useVanishBurst or not self:KnowsSpell("Vanish")
+        or not self:OwnCDReady("Vanish") or now < (self.vanishBlockedUntil or 0)
+    if self:PreparationReady(cfg) and vanishSpent and not markUp then
+        return plan("Preparation", "resetting the burst", extras)
+    end
+
+    -- P7 Mark for Death, the burst's opener: two points, party attack power.
+    -- Only once Taste for Blood is running (Rupture first, as the rotation
+    -- has it), so the burst lands with the melee bonus up - and so the opener
+    -- stays Garrote, Hemorrhage to five, Expose Armor. And not while the sigil
+    -- is about to come back: the Mark, Vanish, Garrote and the sigil are one
+    -- burst, and a Mark spent twenty seconds early leaves the sigil without
+    -- the attack power it was meant to land under.
+    local sodWait = false
+    if cfg.useShadowOfDeath and self:KnowsSpell("Shadow of Death") and not sodReady then
+        local cdLeft = Aegis_SBR:OwnCDLeft("Shadow of Death") or 0
+        sodWait = cdLeft > 0 and cdLeft <= BURST_WAIT
+    end
+    -- With Vanish and the sigil ready the Mark opens a burst, and the Garrote
+    -- after Vanish adds two more points: the Mark then goes out at one point
+    -- at most, so Vanish (which needs three or fewer) follows at once. A log
+    -- had the Mark at two points, Vanish blocked at four, and the burst
+    -- scattered over the next Expose Armor.
+    local burstReady = vanishOK and sodReady and not stealthed
+    local markCap = burstReady and 1 or (cfg.markMaxCP or 3)
+    if not tfbWait and not sodWait and cp <= markCap and self:MarkReady(cfg, cp, builder)
+        and Aegis_SBR:CanAfford("Mark for Death") then
+        return plan("Mark for Death", "party cooldown, " .. cp .. " CP", extras)
+    end
+
+    -- P7b Rupture ahead of an overflow Eviscerate when Taste for Blood will
+    -- lapse before the next five points can be there: the buff is worth more
+    -- than the Eviscerate, and the points now are the only ones in time (a
+    -- log had Eviscerate at two seconds of the buff left, and Rupture then
+    -- waited twenty-six seconds for the next five).
+    if not reserve and useRup and self:TalentRank(TALENT_TASTE) > 0 and cp >= (cfg.ruptureCP or 5) then
+        local tfbLeft = self:TasteLeft()
+        local nextFive = self:BuildSecs(4, (UnitMana("player") or 0) - 30) + 1.0
+        if tfbLeft > 0 and tfbLeft < nextFive and Aegis_SBR:CanAfford("Rupture") then
+            return plan("Rupture", string.format("Taste for Blood lapses in %.0fs, before the next five", tfbLeft), extras)
+        end
+    end
+
+    -- P8 five points and nothing due: the reserve holds them for Expose
+    -- Armor, otherwise Eviscerate spends them when allowed.
+    if cp >= (cfg.cpFinish or 5) then
+        if reserve then
+            -- Energy about to cap while the points wait: a Hemorrhage costs
+            -- nothing that would not have been lost, and keeps its debuff up.
+            if (UnitMana("player") or 0) >= 90 and self:KnowsSpell(builder) then
+                return plan(builder, "energy at the cap while holding for Expose Armor", extras)
+            end
+            return plan(nil, string.format("holding %d CP for Expose Armor in %s", cp,
+                eaLeft and string.format("%.1fs", eaLeft) or "?"), extras)
+        end
+        -- Only with room to spare before the next Expose Armor: an
+        -- Eviscerate just outside the reserve left the debuff down for two
+        -- seconds when the points came back slowly.
+        -- The extra five seconds cover a slow rebuild on low energy; at a full
+        -- bar the rebuild is four global cooldowns, and the margin alone does.
+        local energyNow = UnitMana("player") or 0
+        local spare = (energyNow >= 90) and 1 or 5
+        local room = (not eaLeft) or eaLeft > self:BuildSecs(4, energyNow - 30) + CP_RESERVE_MARGIN + spare
+        if cfg.useEviscerate and self:KnowsSpell("Eviscerate") and room then
+            if not Aegis_SBR:CanAfford("Eviscerate") then
+                return plan(nil, "pooling energy for Eviscerate, " .. cp .. " CP", extras)
+            end
+            return self:FinisherPlan(cfg, cp, "Eviscerate", cp .. " CP, nothing else due", extras)
+        end
+        -- Five points, nothing due, no room even for that Eviscerate - and
+        -- the energy about to cap. Idling here lost seven seconds at full
+        -- energy in a log. Rupture early when Taste for Blood is past half,
+        -- else a Hemorrhage for the energy's sake.
+        if energyNow >= 90 then
+            if useRup and self:TalentRank(TALENT_TASTE) > 0 and self:TasteLeft() <= 12
+                and Aegis_SBR:CanAfford("Rupture") then
+                return plan("Rupture", "energy at the cap, Taste for Blood refreshed early", extras)
+            end
+            if self:KnowsSpell(builder) then
+                return plan(builder, "energy at the cap while holding " .. cp .. " CP", extras)
+            end
+        end
+        return plan(nil, "holding " .. cp .. " CP", extras)
+    end
+
+    -- P9 build
+    local why = reserve and string.format("building for Expose Armor in %s", eaLeft and string.format("%.1fs", eaLeft) or "?")
+        or ("building to " .. (cfg.cpFinish or 5) .. " CP")
+    return plan(builder, why, extras)
+end
+
 function M:Rotate(cfg)
+    -- Combo points gained since the last press, timed: what the Expose Armor
+    -- reserve is measured against. Read before Decide, which may spend them.
+    local cpNow = GetComboPoints("player", "target") or 0
+    -- Did the Expose Armor sent last press go out? Its points are gone if it
+    -- did. Still there: the client refused it, and the thirty seconds stamped
+    -- on the send are withdrawn so the press re-sends it.
+    -- Judged only once the server has had time to answer (the points drop
+    -- on its confirmation, not on the send), so a slow answer is not read as
+    -- a refusal.
+    local chk = self.exposeCheck
+    if chk and (GetTime() - chk.t) >= 0.6 then
+        self.exposeCheck = nil
+        if chk.id == self:TargetId() and cpNow >= chk.cp and chk.cp > 0 then
+            if Aegis_SBR.debuffLedger and chk.id then Aegis_SBR.debuffLedger[chk.id .. "|Expose Armor"] = nil end
+            self.exposeT = nil
+            if self:Tracing() then self:Trace("Expose Armor did not go out (points still there) - again") end
+        end
+    end
+    if self.cpSeenId ~= self:TargetId() then self.cpSeenId = self:TargetId(); self.cpSeen = nil; self.cpLastGainAt = nil end
+    if self.cpSeen ~= nil then self:NoteComboRate(self.cpSeen, cpNow, GetTime()) end
+    self.cpSeen = cpNow
+
     local p = self:Decide(cfg, true)
+    -- Nothing is sent into the global cooldown. The client refuses such a
+    -- send without a word, and every piece of bookkeeping below then records
+    -- a cast that never happened - the Expose Armor ledger above all. The
+    -- press is held and the next one, a quarter second later, sends. A spell
+    -- on a cooldown of its own is not the global cooldown and is not held
+    -- here; Decide already asked OwnCDReady for those.
+    if p and p.spell and not Aegis_SBR:IsReady(p.spell)
+        and (Aegis_SBR:OwnCDLeft(p.spell) or 0) <= 0 then
+        if self:Tracing() then self:Trace("global cooldown, holding " .. p.spell) end
+        return
+    end
     -- Read BEFORE Perform: the cast spends them, and Rupture's duration is what
     -- was spent (8s at one combo point, two more per point after that).
     local cpSpent = GetComboPoints("player", "target") or 0
@@ -768,8 +1325,12 @@ function M:Rotate(cfg)
     -- preview window asks four times a second and which must not change
     -- anything.
     if p and p.spell == "Rupture" and cpSpent > 0 then
-        Aegis_SBR:NoteDebuffApplied(self:TargetId(), "Rupture", 6 + 2 * cpSpent)
+        -- Taste for Blood adds six seconds to the bleed (tooltip).
+        local tfb = (self:TalentRank(TALENT_TASTE) > 0) and 6 or 0
+        Aegis_SBR:NoteDebuffApplied(self:TargetId(), "Rupture", 6 + 2 * cpSpent + tfb)
     end
+    if p and p.spell == "Vanish" then self.vanishAt = GetTime() end
+    if p and p.spell == "Mark for Death" then self.markSentAt = GetTime() end
     -- Expose Armor has neither a cooldown to read nor a readable duration on the
     -- target, so the one thing that stops it re-firing on a client that cannot
     -- see the debuff is remembering the attempt. Written HERE and not in Decide:
@@ -778,6 +1339,20 @@ function M:Rotate(cfg)
     if p and p.spell == "Expose Armor" then
         self.exposeT = GetTime()
         self.exposeId = self:TargetId()
+        -- Thirty seconds from now, for ExposeLeft on a client that cannot read
+        -- the time off the target - PROVISIONALLY: the next press checks that
+        -- the points were actually spent (see the top of Rotate). A send a
+        -- quarter second behind a builder is refused by the global cooldown
+        -- with no message, and stamping it anyway had the rotation treat the
+        -- debuff as up and put the five points into Rupture instead.
+        Aegis_SBR:NoteDebuffApplied(self:TargetId(), "Expose Armor", EXPOSE_DURATION)
+        self.exposeCheck = { cp = cpSpent, id = self:TargetId(), t = GetTime() }
+    end
+    -- A finisher spent the points: the next gain is timed from here, not from
+    -- the last builder before it.
+    if p and p.spell and cpSpent > 0 and (p.spell == "Expose Armor" or p.spell == "Shadow of Death"
+        or p.spell == "Rupture" or p.spell == "Eviscerate" or p.spell == "Slice and Dice" or p.spell == "Envenom") then
+        self.cpLastGainAt = GetTime()
     end
 end
 
@@ -787,7 +1362,7 @@ end
 function M:HandleCommand(cmd, t)
     if cmd == "cp" then
         local n = tonumber(t[2])
-        local cfg = Aegis_SBR:GetActiveProfile()
+        local cfg = M:TabView(Aegis_SBR:GetActiveProfile(), M)
         if cfg and n and n >= 1 and n <= 5 then
             cfg.cpFinish = n
             msgOut("finisher combo points = " .. n .. ".")
@@ -829,10 +1404,25 @@ end)
 -- ============================================================
 local surpriseFrame = CreateFrame("Frame")
 surpriseFrame:RegisterEvent("CHAT_MSG_COMBAT_SELF_MISSES")
+-- Ability misses ("Your Expose Armor was dodged by X.") arrive on the spell
+-- channel, not on SELF_MISSES.
+surpriseFrame:RegisterEvent("CHAT_MSG_SPELL_SELF_DAMAGE")
 surpriseFrame:SetScript("OnEvent", function()
     if event == "CHAT_MSG_COMBAT_SELF_MISSES" then
         if arg1 and string.find(string.lower(arg1), "dodge") then
             M.surpriseExpiry = GetTime() + 5.5
+        end
+    end
+    -- Expose Armor that did not land: forget the thirty seconds the ledger
+    -- was given on the send, so the next five points go into it again.
+    if arg1 and string.find(arg1, "Expose Armor", 1, true) then
+        local l = string.lower(arg1)
+        if string.find(l, "dodge") or string.find(l, "parr") or string.find(l, "miss")
+            or string.find(l, "immune") or string.find(l, "resist") or string.find(l, "block") then
+            local id = M:TargetId()
+            if id and Aegis_SBR.debuffLedger then Aegis_SBR.debuffLedger[id .. "|Expose Armor"] = nil end
+            M.exposeT = nil
+            if Aegis_SBR.logging then Aegis_SBR:LogWrite("Expose Armor did not land: " .. arg1) end
         end
     end
 end)

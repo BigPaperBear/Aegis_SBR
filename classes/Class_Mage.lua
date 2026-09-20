@@ -36,6 +36,10 @@ M.uiTitle = "Mage"
 -- Rotate runs under Aegis_SBR:Preview without casting (see Pick/Later).
 M.previewReady = true
 M.uiHeight = 688
+
+-- Each panel tab keeps its own settings layer (Aegis_SBR:TabView): a change
+-- made on one tab stays on that tab.
+M.tabLayers = { field = "mode", keys = { "frost", "fire", "arcane" } }
 M.meleeAutoAttack = false   -- caster, no white melee swing
 
 -- Chat output is shared in the core; this shim keeps call sites unchanged.
@@ -687,7 +691,7 @@ end
 -- ============================================================
 function M:HandleCommand(cmd, t)
     if cmd == "mode" then
-        local cfg = Aegis_SBR:GetActiveProfile()
+        local cfg = M:TabView(Aegis_SBR:GetActiveProfile(), M)
         local mode = self.modeAlias[string.lower(t[2] or "")]
         if cfg and mode then
             cfg.mode = mode
@@ -698,14 +702,14 @@ function M:HandleCommand(cmd, t)
         return true
     end
     if cmd == "aoe" then
-        local cfg = Aegis_SBR:GetActiveProfile()
+        local cfg = M:TabView(Aegis_SBR:GetActiveProfile(), M)
         if not cfg then msgOut("no profile active.", 1, 0.5, 0.3); return true end
         cfg.aoeMode = not cfg.aoeMode
         msgOut("AoE mode " .. (cfg.aoeMode and "on" or "off") .. ".")
         return true
     end
     if cmd == "wandhp" then
-        local cfg = Aegis_SBR:GetActiveProfile()
+        local cfg = M:TabView(Aegis_SBR:GetActiveProfile(), M)
         if not cfg then return true end
         local v = tonumber(t[2])
         if v and v >= 0 and v <= 100 then

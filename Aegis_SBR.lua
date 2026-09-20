@@ -17,7 +17,7 @@
 -- ============================================================
 
 Aegis_SBR = {
-    ver = "1.2.34",
+    ver = "1.2.35",
     classes = {},     -- token -> module table
     active = nil,      -- the module for this character's class
     Loaded = false,
@@ -354,6 +354,9 @@ function Aegis_SBR:Pick(name, reason)
     -- has legitimately changed, instead of redrawing on every sub-second wobble.
     Aegis_SBR.pressSeq = (Aegis_SBR.pressSeq or 0) + 1
     Aegis_SBR:NoteSpellCast(name)
+    -- Every send in the log with its reason: the per-press line says what the
+    -- rotation saw, this says what it did with it.
+    if self:Tracing() then self:Trace("-> " .. name .. " (" .. (reason or "") .. ")") end
     CastSpellByName(name)
     return true
 end
@@ -371,6 +374,7 @@ function Aegis_SBR:PickQueue(name, reason)
     -- has legitimately changed, instead of redrawing on every sub-second wobble.
     Aegis_SBR.pressSeq = (Aegis_SBR.pressSeq or 0) + 1
     Aegis_SBR:NoteSpellCast(name)
+    if self:Tracing() then self:Trace("-> " .. name .. " (" .. (reason or "") .. ")" .. (QueueSpellByName and " queued" or "")) end
     if QueueSpellByName then QueueSpellByName(name) else CastSpellByName(name) end
     return true
 end
@@ -648,7 +652,7 @@ end
 -- table.remove(t, 1) would shift every entry on every press, which at a
 -- multi-thousand cap is real work inside the rotation's hot path.
 -- ============================================================
-local LOG_MAX = 2000
+local LOG_MAX = 6000
 
 function Aegis_SBR:LogInit(reset)
     if type(AegisLog) ~= "table" then AegisLog = {} end
@@ -660,7 +664,14 @@ function Aegis_SBR:LogInit(reset)
         AegisLog.t0 = GetTime()
     end
     if not AegisLog.t0 then AegisLog.t0 = GetTime() end
-    if not AegisLog.max then AegisLog.max = LOG_MAX end
+    -- Grown once: a rogue's raid fight rolled its own start out of the old
+    -- two thousand lines before the reload that writes the file.
+    if not AegisLog.max or AegisLog.max < LOG_MAX then
+        -- A ring cannot be resized in place (slot = pos mod max): start over.
+        AegisLog.entries = {}
+        AegisLog.pos = 0
+        AegisLog.max = LOG_MAX
+    end
     return AegisLog
 end
 
@@ -2781,6 +2792,11 @@ end
 
 -- Validity is a class rule. Without a module nothing is missing.
 function Aegis_SBR:Validity(cfg)
+    -- Judged as the active tab sees the profile: a builder chosen on the
+    -- Subtlety tab lives in that tab's layer, and the base value underneath
+    -- it is not what the rotation runs - reading it warned about a spell the
+    -- rotation never touches, on every press of a fight.
+    if self.active and self.active.tabLayers then cfg = self:TabView(cfg, self.active) end
     if self.active and self.active.ProfileValidity then return self.active:ProfileValidity(cfg) end
     return true, {}
 end
@@ -3053,7 +3069,67 @@ end
 -- there falls through, so a profile with no overrides at all behaves exactly as
 -- before. Done as a proxy rather than a merged copy so the rotation's reads
 -- cost nothing extra and its writes still land on the real profile.
+-- Per-tab settings layers.
+--
+-- A module whose panel has spec tabs declares `M.tabLayers = { field, keys,
+-- base, records }`: the profile field that names the tab, the tab keys, the
+-- fields that stay on the base regardless (derived from the tab, like the
+-- paladin's healMode), and the record tables layered key by key (the
+-- paladin's `spells`, `seals`). TabView is the profile as the ACTIVE TAB sees
+-- it: reads fall from the tab's layer to the base, writes land in the tab's
+-- layer. So a switch flipped on one page is flipped on that page alone - the
+-- tabs used to edit one set of settings, which was reported as a change on the
+-- paladin's Solofarming page changing the tank and the healer too. Lists are
+-- whole values: present in the layer, the layer's wins outright.
+--
+-- Older profiles carry everything on the base and empty layers: every tab
+-- shows the base until edited, and only its own edits diverge from it.
+local function recordProxy(over, base, key)
+    return setmetatable({}, {
+        __index = function(_, k)
+            local v = over[key] and over[key][k]
+            if v ~= nil then return v end
+            return base[key] and base[key][k]
+        end,
+        __newindex = function(_, k, v)
+            if type(over[key]) ~= "table" then over[key] = {} end
+            over[key][k] = v
+        end,
+    })
+end
+
+function Aegis_SBR:TabView(cfg, mod)
+    mod = mod or (self.tabLayers and self) or self.active
+    local tl = mod and mod.tabLayers
+    if not tl or not cfg or cfg.__tabView then return cfg end
+    local spec = cfg[tl.field]
+    if not spec then return cfg end
+    local isLayer = false
+    for i = 1, table.getn(tl.keys) do if tl.keys[i] == spec then isLayer = true end end
+    if not isLayer then return cfg end
+    if type(cfg[spec]) ~= "table" then cfg[spec] = {} end
+    local over = cfg[spec]
+    local baseKeys, records = tl.base or {}, tl.records or {}
+    local layerName = {}
+    for i = 1, table.getn(tl.keys) do layerName[tl.keys[i]] = true end
+    return setmetatable({}, {
+        __index = function(_, k)
+            if k == "__tabView" then return true end
+            if k == tl.field or baseKeys[k] or layerName[k] then return cfg[k] end
+            if records[k] and type(cfg[k]) == "table" then return recordProxy(over, cfg, k) end
+            local v = over[k]
+            if v ~= nil then return v end
+            return cfg[k]
+        end,
+        __newindex = function(_, k, v)
+            if k == tl.field or baseKeys[k] or layerName[k] then cfg[k] = v else over[k] = v end
+        end,
+    })
+end
+
 function Aegis_SBR:EffectiveConfig(cfg)
+    -- The active tab's own layer first (see TabView), the AoE set on top.
+    if self.active and self.active.tabLayers then cfg = self:TabView(cfg, self.active) end
     -- A module that keeps its own layers (the hunter: one per spec, each with
     -- its own AoE set) applies them itself inside Rotate.
     if self.active and self.active.ownsAoeLayer then return cfg end
@@ -3095,6 +3171,8 @@ function Aegis_SBR:RunRotation(mode)
 
     -- Support modules (e.g. the paladin heal mode) may run without an attackable
     -- target and must not be forced to grab one.
+    -- Both hooks see the profile through the active tab's layer too.
+    if self.active.tabLayers then cfg = self:TabView(cfg, self.active) end
     local supportRun = self.active.RunsWithoutTarget and self.active:RunsWithoutTarget(cfg)
 
     -- Targeting: three mutually exclusive modes (see TargetMode). "assist"
@@ -3158,7 +3236,11 @@ function Aegis_SBR:RunRotation(mode)
     -- already started it. Gated on melee range so an accidentally targeted far
     -- enemy never starts a swing (no stray pull). meleeAutoAttack == false (e.g.
     -- the Druid) opts out and manages its own swing in the module.
-    if self.active.meleeAutoAttack ~= false and self:InMeleeRange() then self:EnsureAutoAttack() end
+    --
+    -- Never from stealth: starting the swing breaks it, and the press from
+    -- stealth belongs to the opener (the rogue's Garrote), which needs it.
+    local stealthed = IsStealthed and IsStealthed()
+    if self.active.meleeAutoAttack ~= false and self:InMeleeRange() and not stealthed then self:EnsureAutoAttack() end
 
     self:SnapshotBuffs()
     self:SnapshotTargetDebuffs()

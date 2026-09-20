@@ -307,6 +307,15 @@ M.strikeCmdAlias = {
 
 -- Fills any missing field with a default and migrates old-format profiles
 -- (old standard slot becomes the damage slot, old mana slot is dropped).
+-- The panel's four tabs each keep their own settings layer (Aegis_SBR:TabView).
+-- `spells` and `seals` are records, layered key by key; healMode is derived
+-- from the tab and stays on the base.
+M.LAYERS = { "tank", "solo", "retri", "heal" }
+M.tabLayers = { field = "spec", keys = M.LAYERS, base = { healMode = true },
+                records = { spells = true, seals = true } }
+
+function M:SpecConfig(cfg) return self:TabView(cfg, M) end
+
 function M:NormalizeProfile(c)
     c.seals = c.seals or {}
     if c.seals.damage == nil then c.seals.damage = c.seals.standard or "" end
@@ -352,6 +361,12 @@ function M:NormalizeProfile(c)
     if c.manaWeaveMin == nil then c.manaWeaveMin = 15 end
     if c.manaWisdomDebuff == nil then c.manaWisdomDebuff = false end
     if c.hpManage == nil then c.hpManage = false end
+    -- Judging the seals is a switch. On for the tank and DPS pages; the
+    -- Solofarming layer starts with it OFF - the pack does not live long enough
+    -- for a judgement to pay its mana back, and Seal of Wisdom is kept as a
+    -- buff on the paladin, as the healer keeps it.
+    if c.judgeSeals == nil then c.judgeSeals = true end
+    if type(c.solo) == "table" and c.solo.judgeSeals == nil then c.solo.judgeSeals = false end
     if c.hpLow  == nil then c.hpLow  = 30 end
     if c.hpHigh == nil then c.hpHigh = 70 end
     if c.sealTwist == nil then c.sealTwist = false end
@@ -373,6 +388,15 @@ function M:NormalizeProfile(c)
         c.spec = c.healMode and "heal" or "retri"
     end
     c.healMode = (c.spec == "heal")
+    -- One sparse settings layer per tab. A key present in the active tab's
+    -- layer wins over the base; absent, the base applies. So a change made on
+    -- the Solofarming page stays on the Solofarming page - the four tabs used
+    -- to edit one set of settings, and a switch flipped for farming flipped it
+    -- for the tank and the healer as well.
+    for i = 1, table.getn(M.LAYERS) do
+        local k = M.LAYERS[i]
+        if type(c[k]) ~= "table" then c[k] = {} end
+    end
     if c.healThreshold == nil then c.healThreshold = 75 end
     -- Reserve Holy Light for targets below this health percent (0 = off, the
     -- efficiency comparison in DoHeal decides on its own). Community request:
@@ -527,6 +551,10 @@ function M:NormalizeProfile(c)
     -- Split the old single heal-weave toggle into two independent behaviours
     -- (CS reload of Holy Shock, and Holy Strike filler), then retire it.
     if c.healReloadCS == nil then c.healReloadCS = (c.healWeaveStrikes ~= false) end
+    -- Solofarming: Flash of Light is its own switch, off by default - in
+    -- defensive gear it barely moves the bar and its cast is time not spent
+    -- on damage.
+    if c.soloUseFlash == nil then c.soloUseFlash = false end
     if c.healSplashHS == nil then c.healSplashHS = (c.healWeaveStrikes ~= false) end
     c.healWeaveStrikes = nil
     -- Retired: a mana floor under the Holy Strike filler. Two things were wrong
@@ -616,6 +644,14 @@ end
 -- Management hysteresis state
 -- ============================================================
 function M:UpdateManagement(cfg)
+    -- Solofarming runs on Seal of Wisdom the whole time and heals itself with
+    -- its own engine; the two seal-swapping managers have nothing to do there
+    -- and their sections are not shown on that page.
+    if cfg.spec == "solo" then
+        self.manaMgmtActive = false
+        self.hpMgmtActive = false
+        return
+    end
     if cfg.manaManage and self:KnowsSpell("Seal of Wisdom") then
         local mp = self:ManaPct()
         if mp < cfg.manaLow  then self.manaMgmtActive = true end
@@ -745,6 +781,27 @@ function M:Affordable(name)
     return Aegis_SBR:CanAfford(name)
 end
 
+-- Every pick checks the cost. A send the client refuses for mana still ends
+-- the press, and a log showed Consecration sent on twenty presses in a row at
+-- a tenth of its cost - five seconds in which the seal was not re-cast and
+-- nothing else ran. An unreadable cost answers YES (CanAfford), so a tooltip
+-- that failed to populate can never lock a step out. Traced once per spell
+-- per two seconds so a mana-starved fight does not drown the log.
+function M:Pick(name, reason)
+    if not Aegis_SBR:CanAfford(name) then
+        if self:Tracing() then
+            local now = GetTime()
+            if not self.costTraced then self.costTraced = {} end
+            if (self.costTraced[name] or 0) <= now - 2.0 then
+                self.costTraced[name] = now
+                self:Trace("skip " .. name .. " (cost)")
+            end
+        end
+        return false
+    end
+    return Aegis_SBR.Pick(self, name, reason)
+end
+
 function M:CastStrike(name, cfg)
     -- Checked against the rank that will actually go out: a downranked strike
     -- costs less, and refusing it at full-rank price would hold back the very
@@ -764,6 +821,7 @@ function M:CastStrike(name, cfg)
                 p.spell = ranked; p.reason = "downranked to save mana"
                 return true
             end
+            if self:Tracing() then self:Trace("-> " .. ranked .. " (strike, downranked)") end
             CastSpellByName(ranked)
             self.lastStrike = name
             return true
@@ -887,9 +945,13 @@ function M:HandleSeals(cfg, forceDebuff)
         effDebuff = "Seal of Wisdom"
     end
 
+    -- Judging off (the Solofarming default): no debuff stamp, no damage
+    -- judge - the seals are buffs on the paladin and nothing more.
+    local judging = cfg.judgeSeals ~= false
+
     -- (A) Always make sure a new mob carries the (effective) debuff.
     -- Skipped if Judgement is not yet learned.
-    if effDebuff ~= "" and canJudge and not self:DebuffEffectivelyUp(effDebuff) then
+    if judging and effDebuff ~= "" and canJudge and not self:DebuffEffectivelyUp(effDebuff) then
         if not self:HasBuff(effDebuff) then return self:Pick(effDebuff, "debuff seal") end
         -- Judgement reaches about ten yards; the seal above is a self buff and
         -- needs nothing. Without this the seal went up at range and the
@@ -938,7 +1000,7 @@ function M:HandleSeals(cfg, forceDebuff)
     -- else hold the debuff seal as a buff only.
     local seal, judgeIt
     if dmgSeal ~= "" then
-        seal, judgeIt = dmgSeal, true
+        seal, judgeIt = dmgSeal, judging
     elseif debuffSeal ~= "" then
         seal, judgeIt = debuffSeal, false
     else
@@ -993,6 +1055,7 @@ end
 -- UpdateManagement runs first so a paladin in mana or health recovery pre-casts
 -- the seal that recovery wants, not the damage one.
 function M:Prebuff(cfg)
+    cfg = self:SpecConfig(cfg)
     if cfg.healMode then return false end
     self:UpdateManagement(cfg)
     local seal = self:DesiredOpenerSeal(cfg)
@@ -2246,6 +2309,124 @@ function M:DoHeal(cfg)
     return false
 end
 
+-- Solofarming's own self-heal.
+--
+-- The group engine (DoHeal) chooses Flash of Light first and Holy Light only
+-- when no Flash covers the deficit, which is the healer's trade: many small
+-- fast heals. Solofarming is the opposite trade. The paladin stands in a pack
+-- in defensive gear, the pack dies to Consecration, procs and blocks, and every
+-- global spent healing is a global not spent on the one mob being worked down.
+-- So the order here is by TIME, not by size per mana:
+--
+--   1. Holy Shock, instant, below its own line - it costs nothing but the
+--      global, and Crusader Strike brings it back (Blessed Strikes).
+--   2. Holy Light below its line when Holy Shock is on cooldown - the longer
+--      cast, but a heal that lasts long enough for real damage to happen
+--      before the next one.
+--   3. Flash of Light only when switched on, below its own line: in defensive
+--      gear it barely moves the bar, so by default it is not used at all.
+--
+-- Reported as the rotation never getting out of healing once it started: the
+-- group engine kept choosing Flash of Light, which healed too little to end
+-- the emergency, and Holy Shock was held for the emergency line alone.
+--
+-- Rank choice is the engine's own (SelectRank / PickRank): the largest rank
+-- whose heal lands under the deficit, mana permitting. Cast-time heals stand
+-- down while moving, Holy Shock does not.
+--
+-- And a cast-time heal has to be WORTH its cast. Mana runs out in a long
+-- pull, and the rank ladder then hands back rank 1 or 2 - a log showed a
+-- string of 2.5 second Holy Lights landing for 50 to 100 health against a
+-- deficit of two thousand. Those casts heal nothing and stop the swings that
+-- would have returned mana through Seal of Wisdom. A cast-time heal under a
+-- share of the deficit is skipped, and the press goes back to fighting; Holy
+-- Shock, being instant, is always worth its press.
+local SOLO_MIN_HEAL_SHARE = 0.2
+
+function M:SoloHeal(cfg)
+    local mx = UnitHealthMax("player")
+    if not mx or mx <= 0 then return false end
+    local cur = UnitHealth("player")
+    -- Credit the heal still in flight (PendingFor): the cast bar ends a beat
+    -- before the heal lands, and the health bar in that beat still reads low -
+    -- a log had Holy Light sent again at the exact end of the previous one,
+    -- landing on a full bar unless the player cancelled it by hand. The credit
+    -- ends on evidence, the moment health rises, or on a short ceiling.
+    cur = cur + self:PendingFor("player")
+    if cur > mx then cur = mx end
+    local pct = cur / mx
+    local deficit = mx - cur
+
+    local wantShock = cfg.useHolyShock and pct <= (cfg.holyShockPct or 60) / 100
+    local wantHL = pct <= (cfg.ratioHealthy or 50) / 100
+    local flAt = cfg.healSelfPct or 0
+    local wantFL = cfg.soloUseFlash and flAt > 0 and pct <= flAt / 100
+    if not (wantShock or wantHL or wantFL) then return false end
+    if deficit < self:SmallestHeal() then return false end
+    if not self:GcdReady() then return true end
+    if self:StillCasting() then return true end
+
+    local mana = UnitMana("player")
+    local hp = (cfg.healPower and cfg.healPower > 0) and cfg.healPower or self:GearHealBonus()
+    local talentMod = self:HealTalentMod()
+
+    if wantShock and self:KnowsSpell("Holy Shock") and self:OwnCDReady("Holy Shock") then
+        local hsEff = self:EffHeals(self.HS_HEAL, 1.5 / 3.5, talentMod, hp)
+        local hs, amt = self:PickRank("Holy Shock", hsEff, self.HS_MANA, deficit, mana)
+        if hs then
+            self:CommitHeal("player", amt, 0, hs, deficit)
+            self:CastOn(hs, "player")
+            return true
+        end
+    end
+
+    if not (wantHL or wantFL) then return false end
+    if Aegis_SBR:Moving() then
+        if self:Tracing() then self:Trace("moving, no cast-time self-heal") end
+        return false
+    end
+
+    if wantHL and self:KnowsSpell("Holy Light") then
+        local hlFast = self:BuffTextureUp(FORCE_HL_TEX) or self:HasBuff("Holy Judgement")
+        local known = self:MaxRank("Holy Light")
+        if known > table.getn(self.HL_RANKS) then known = table.getn(self.HL_RANKS) end
+        local rank, size = self:SelectRank(self.HL_RANKS, known, deficit, mana, (2.5 / 3.5) * hp,
+            talentMod, 0.8, cfg.hlMinRank, cfg.hlMaxRank)
+        if rank and (size or 0) < deficit * SOLO_MIN_HEAL_SHARE then
+            if self:Tracing() then
+                self:Trace(string.format("self-heal too small: Holy Light rank %d heals %.0f of %.0f - fighting on", rank, size or 0, deficit))
+            end
+            rank = nil
+        end
+        if rank then
+            local spell = "Holy Light(Rank " .. rank .. ")"
+            self:CommitHeal("player", size, hlFast and 1.5 or 2.5, spell, deficit)
+            self:CastOn(spell, "player")
+            return true
+        end
+    end
+
+    if wantFL and self:KnowsSpell("Flash of Light") then
+        local known = self:MaxRank("Flash of Light")
+        if known > table.getn(self.FOL_RANKS) then known = table.getn(self.FOL_RANKS) end
+        local rank, size = self:SelectRank(self.FOL_RANKS, known, deficit, mana, (1.5 / 3.5) * hp,
+            talentMod, 0.9, cfg.folMinRank, cfg.folMaxRank)
+        if rank and (size or 0) < deficit * SOLO_MIN_HEAL_SHARE then
+            if self:Tracing() then
+                self:Trace(string.format("self-heal too small: Flash of Light rank %d heals %.0f of %.0f - fighting on", rank, size or 0, deficit))
+            end
+            rank = nil
+        end
+        if rank then
+            local spell = "Flash of Light(Rank " .. rank .. ")"
+            self:CommitHeal("player", size, 1.5, spell, deficit)
+            self:CastOn(spell, "player")
+            return true
+        end
+    end
+    return false
+end
+
 -- Heal mode runs even without an attackable target, so the paladin can heal at
 -- range. The core's RunRotation honors this hook.
 function M:RunsWithoutTarget(cfg)
@@ -2584,15 +2765,57 @@ function M:PanicHeal(cfg)
     if not mx or mx <= 0 then return false end
     if (UnitHealth("player") / mx) >= (goal / 100) then return false end
 
+    -- Solofarming: Holy Light, the best heal per mana, since under the bubble
+    -- there is all the time in the world for its cast. The group engine below
+    -- reached for Flash of Light here, which barely moves the bar in
+    -- defensive gear. Rank: the largest whose heal fits the way to the goal.
+    if cfg.spec == "solo" then
+        if not self:GcdReady() then return true end
+        if self:StillCasting() then return true end
+        local cur = UnitHealth("player") + self:PendingFor("player")
+        local need = mx * goal / 100 - cur
+        if need <= 0 then return false end
+        local mana = UnitMana("player")
+        local hp = (cfg.healPower and cfg.healPower > 0) and cfg.healPower or self:GearHealBonus()
+        local talentMod = self:HealTalentMod()
+        if self:KnowsSpell("Holy Light") then
+            local known = self:MaxRank("Holy Light")
+            if known > table.getn(self.HL_RANKS) then known = table.getn(self.HL_RANKS) end
+            local rank, size = self:SelectRank(self.HL_RANKS, known, need, mana, (2.5 / 3.5) * hp,
+                talentMod, 1.0, cfg.hlMinRank, cfg.hlMaxRank)
+            if rank then
+                local spell = "Holy Light(Rank " .. rank .. ")"
+                local hlFast = self:BuffTextureUp(FORCE_HL_TEX) or self:HasBuff("Holy Judgement")
+                self:CommitHeal("player", size, hlFast and 1.5 or 2.5, spell, need)
+                self:CastOn(spell, "player")
+                return true
+            end
+        end
+        -- No Holy Light affordable: the instant, if it is up.
+        if cfg.useHolyShock and self:KnowsSpell("Holy Shock") and self:OwnCDReady("Holy Shock") then
+            local hsEff = self:EffHeals(self.HS_HEAL, 1.5 / 3.5, talentMod, hp)
+            local hs, amt = self:PickRank("Holy Shock", hsEff, self.HS_MANA, need, mana)
+            if hs then
+                self:CommitHeal("player", amt, 0, hs, need)
+                self:CastOn(hs, "player")
+                return true
+            end
+        end
+        return false
+    end
+
     -- The ordinary heal engine, aimed at the player and told to stop at the
     -- goal. Nothing here counts casts or remembers anything between presses:
     -- the health bar is the state, so there is nothing to get out of step.
-    local win = { spec = "solo", healThreshold = goal, healSelfPct = 0 }
-    for k, v in pairs(cfg) do if win[k] == nil then win[k] = v end end
+    -- A view over the profile rather than a copy: the profile may itself be
+    -- the tab view, which pairs() cannot walk.
+    local win = setmetatable({ spec = "solo", healThreshold = goal, healSelfPct = 0 }, { __index = cfg })
     return self:DoHeal(win)
 end
 
 function M:Rotate(cfg)
+    -- Everything below reads the profile through the active tab's own layer.
+    cfg = self:SpecConfig(cfg)
     -- The panel writes `spec`; everything below branches on `healMode`. Deriving
     -- it here rather than in the tab handler keeps the two in step no matter how
     -- the profile was changed - slash command, tab click, or an imported profile.
@@ -2930,10 +3153,18 @@ function M:Rotate(cfg)
     -- proc, the block - so nothing here competes with a global cooldown that
     -- would otherwise have been a big hit.
     if cfg.spec == "solo" then
-        -- Self-healing through the ordinary heal engine, aimed at the player
-        -- (see GroupUnits). Holy Shock, Flash of Light and Holy Light all reach
-        -- it, including the Holy Judgement speed-up.
-        if self:DoHeal(cfg) then return end
+        -- The seal first, ahead of the heals: Seal of Wisdom is what pays for
+        -- everything below through the swings, so a missing seal is the most
+        -- expensive thing on this list. One instant, then the heal.
+        local seal = cfg.seals.damage
+        if not seal or seal == "" then seal = cfg.seals.debuff end
+        if seal and seal ~= "" and self:KnowsSpell(seal) and not self:HasBuff(seal) then
+            if self:Pick(seal, "seal first") then return end
+        end
+
+        -- Self-healing by time rather than by size: Holy Shock, then Holy
+        -- Light, Flash of Light only when switched on (see SoloHeal).
+        if self:SoloHeal(cfg) then return end
 
         -- Holy Shield kept up rather than used on cooldown: block chance is
         -- survival here, and the blocks are a damage source of their own.
@@ -2979,6 +3210,12 @@ function M:Rotate(cfg)
     -- cooldown on anything other than the Crusader Strike reset costs the
     -- self-heal it would have bought. HealStrikeEngine already expresses exactly
     -- that rule, so it is used here rather than restated.
+    --
+    -- And ONLY that: without Blessed Strikes Solofarming strikes not at all.
+    -- A strike costs mana the self-heal needs and stops nothing from dying
+    -- faster - the pack dies to Consecration, the aura and the blocks. Tried
+    -- once as "strike like the other pages then", and taken back: it drained
+    -- the mana the heals were short of.
     if cfg.spec == "solo" then
         if self:HealStrikeEngine(cfg) then return end
     elseif not cfg.healMode and self:InMeleeRange()
@@ -3077,7 +3314,7 @@ end
 -- Quick AoE toggle: flips Consecration on the active profile, for binding to
 -- a key. There is no reliable enemy count on 1.12, so this stays manual.
 function M:CmdAoe()
-    local cfg = Aegis_SBR:GetActiveProfile()
+    local cfg = M:SpecConfig(Aegis_SBR:GetActiveProfile())
     if not cfg then msgOut("no profile active.", 1, 0.5, 0.3); return end
     cfg.spells.consecration = not cfg.spells.consecration
     msgOut("Consecration " .. (cfg.spells.consecration and "on (AoE)" or "off") .. ".")
@@ -3087,11 +3324,10 @@ end
 -- hs = only Holy Strike, cs = only Crusader Strike, auto = both on + Auto DPS,
 -- tank = both on + Tank (block, then aggro). The UI is the primary control.
 function M:CmdStrike(alias)
-    local cfg = Aegis_SBR:GetActiveProfile()
+    local cfg = M:SpecConfig(Aegis_SBR:GetActiveProfile())
     if not cfg then msgOut("no profile active.", 1, 0.5, 0.3); return end
     local what = self.strikeCmdAlias[string.lower(alias or "")]
     if not what then msgOut("usage: /sbr strike off|hs|cs|auto|tank|alternate", 1, 0.5, 0.3); return end
-    cfg.spells = cfg.spells or {}
     if what == "off" then
         cfg.spells.holyStrike, cfg.spells.crusaderStrike = false, false
     elseif what == "hs" then
@@ -3152,7 +3388,7 @@ end
 
 function M:HandleCommand(cmd, t)
     if cmd == "hps" then
-        local cfg = Aegis_SBR:GetActiveProfile()
+        local cfg = M:SpecConfig(Aegis_SBR:GetActiveProfile())
         if not cfg then return true end
         local mode = self:ToggleHPS(cfg)
         if mode == "high" then
@@ -3163,7 +3399,7 @@ function M:HandleCommand(cmd, t)
         return true
     end
     if cmd == "prio" then
-        local cfg = Aegis_SBR:GetActiveProfile()
+        local cfg = M:SpecConfig(Aegis_SBR:GetActiveProfile())
         if not cfg then return true end
         local a = string.lower(t[2] or "")
         if a == "add" then
@@ -3192,7 +3428,7 @@ function M:HandleCommand(cmd, t)
     if cmd == "aoe"    then self:CmdAoe(); return true end
     if cmd == "strike" then self:CmdStrike(t[2]); return true end
     if cmd == "heal" then
-        local cfg = Aegis_SBR:GetActiveProfile()
+        local cfg = M:SpecConfig(Aegis_SBR:GetActiveProfile())
         if not cfg then return true end
         local a = string.lower(t[2] or "")
         -- Writes `spec`, not `healMode`: the rotation derives healMode from spec
@@ -3207,7 +3443,7 @@ function M:HandleCommand(cmd, t)
         return true
     end
     if cmd == "healat" then
-        local cfg = Aegis_SBR:GetActiveProfile()
+        local cfg = M:SpecConfig(Aegis_SBR:GetActiveProfile())
         if not cfg then return true end
         local v = tonumber(t[2])
         if v and v >= 1 and v <= 100 then cfg.healThreshold = v; msgOut("healing members below " .. v .. "% health.")
@@ -3215,7 +3451,7 @@ function M:HandleCommand(cmd, t)
         return true
     end
     if cmd == "hsat" then
-        local cfg = Aegis_SBR:GetActiveProfile()
+        local cfg = M:SpecConfig(Aegis_SBR:GetActiveProfile())
         if not cfg then return true end
         local v = tonumber(t[2])
         if v and v >= 1 and v <= 100 then cfg.holyShockPct = v; msgOut("Holy Shock emergency below " .. v .. "% health.")
@@ -3223,7 +3459,7 @@ function M:HandleCommand(cmd, t)
         return true
     end
     if cmd == "healpower" then
-        local cfg = Aegis_SBR:GetActiveProfile()
+        local cfg = M:SpecConfig(Aegis_SBR:GetActiveProfile())
         if not cfg then return true end
         local v = tonumber(t[2])
         if v and v >= 0 then cfg.healPower = v; msgOut("healing bonus set to " .. v .. " (0 = auto from gear).")
@@ -3335,7 +3571,7 @@ overhealFrame:SetScript("OnUpdate", function()
     if Aegis_SBR.active ~= M then return end
     if not M.castingUntil or GetTime() >= M.castingUntil then return end
     if not M.healUnit or not M.healAmount or M.healAmount <= 0 then return end
-    local cfg = Aegis_SBR:GetActiveProfile()
+    local cfg = M:SpecConfig(Aegis_SBR:GetActiveProfile())
     if not cfg or not cfg.healMode then return end
     local thr = cfg.overhealCancel or 0
     if thr <= 0 then return end

@@ -36,6 +36,10 @@ M.uiTitle = "Shaman"
 -- Rotate runs under Aegis_SBR:Preview without casting (see Pick/Later).
 M.previewReady = true
 M.uiHeight = 698
+
+-- Each panel tab keeps its own settings layer (Aegis_SBR:TabView): a change
+-- made on one tab stays on that tab.
+M.tabLayers = { field = "mode", keys = { "enhancement", "elemental", "tank", "restoration" } }
 M.meleeAutoAttack = false   -- melee swing is managed per-mode in the module
 
 -- Talent that grants the Clearcasting proc. It grants no spell, so KnowsSpell
@@ -1567,7 +1571,7 @@ end
 -- ============================================================
 function M:HandleCommand(cmd, t)
     if cmd == "mode" then
-        local cfg = Aegis_SBR:GetActiveProfile()
+        local cfg = M:TabView(Aegis_SBR:GetActiveProfile(), M)
         local mode = self.modeAlias[string.lower(t[2] or "")]
         if cfg and mode then
             cfg.mode = mode
@@ -1578,7 +1582,7 @@ function M:HandleCommand(cmd, t)
         return true
     end
     if cmd == "shock" then
-        local cfg = Aegis_SBR:GetActiveProfile()
+        local cfg = M:TabView(Aegis_SBR:GetActiveProfile(), M)
         local shock = self.shockAlias[string.lower(t[2] or "")]
         if cfg and shock then
             cfg.shock = shock
@@ -1589,7 +1593,7 @@ function M:HandleCommand(cmd, t)
         return true
     end
     if cmd == "weave" then
-        local cfg = Aegis_SBR:GetActiveProfile()
+        local cfg = M:TabView(Aegis_SBR:GetActiveProfile(), M)
         if not cfg then msgOut("no profile active.", 1, 0.5, 0.3); return true end
         local a = string.lower(t[2] or "")
         if a == "on" then cfg.weaveDamage = true
@@ -1599,7 +1603,7 @@ function M:HandleCommand(cmd, t)
         return true
     end
     if cmd == "shield" then
-        local cfg = Aegis_SBR:GetActiveProfile()
+        local cfg = M:TabView(Aegis_SBR:GetActiveProfile(), M)
         local shield = self.shieldAlias[string.lower(t[2] or "")]
         if cfg and shield then
             cfg.shield = shield
