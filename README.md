@@ -62,8 +62,9 @@ SuperWoW fall back to icon matching).
 it, so the same profile plays a level 1 character and a raider — spells switch themselves on
 as you train them, and the panel marks anything untrained as *(not learned)*.
 
-**Profiles, per character.** Keep *Leveling*, *Raid*, and *PvP* setups side by side and
-switch instantly. For the classes whose rotation branches by spec, the config window shows a
+**Profiles, per character - and as text.** Keep *Leveling*, *Raid*, and *PvP* setups side by side and
+switch instantly. **Share** turns the saved profile into a string to paste to another player of
+your class (Discord-safe); pasted back in, **Import** creates it as a new profile. For the classes whose rotation branches by spec, the config window shows a
 **spec tab rail** and only the active spec's controls — the tab you're on *is* the mode the
 rotation runs.
 
@@ -461,6 +462,8 @@ alias from the AutoRota era, so old macros keep functioning.
 | `/sbr use <name>` | Switch to a profile |
 | `/sbr new <name> [template]` | Create a profile from a class template |
 | `/sbr del <name>` | Delete a profile |
+| `/sbr export [name]` | A profile as a text string to share (the active one when no name is given) |
+| `/sbr import` | Paste a shared profile string; it becomes a new profile |
 | `/sbr off` | Stop running any profile |
 | `/sbr check` | Report whether the active profile suits your learned spells |
 | `/sbr reset` | Reseed profiles from the class templates |

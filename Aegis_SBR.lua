@@ -2909,6 +2909,199 @@ function Aegis_SBR:Validity(cfg)
 end
 
 -- ============================================================
+-- Profile transfer: one string, pasted between players
+--
+-- A 1.12 addon reads and writes no files, only its own saved variables at
+-- login; what can travel is text. A profile is serialized to a compact form
+-- and base64-encoded, so chat and Discord leave it alone (no markdown
+-- characters; whitespace is dropped on the way back), and prefixed with the
+-- class it belongs to. Import creates a new profile under the stored name
+-- (numbered when taken) and normalizes it, so a string from an older version
+-- gets today's defaults for what it lacks, and keys this version does not know
+-- are kept. Nothing character-bound is inside: the targeting mode, the assist
+-- name and the logs live outside the profile.
+-- ============================================================
+local B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+local B64R = {}
+for i = 1, 64 do B64R[string.sub(B64, i, i)] = i - 1 end
+
+local function b64enc(s)
+    local out = {}
+    local n = string.len(s)
+    local i = 1
+    while i <= n do
+        local a = string.byte(s, i) or 0
+        local b = string.byte(s, i + 1)
+        local c = string.byte(s, i + 2)
+        local v = a * 65536 + (b or 0) * 256 + (c or 0)
+        local c1 = math.floor(v / 262144)
+        local c2 = math.mod(math.floor(v / 4096), 64)
+        local c3 = math.mod(math.floor(v / 64), 64)
+        local c4 = math.mod(v, 64)
+        table.insert(out, string.sub(B64, c1 + 1, c1 + 1) .. string.sub(B64, c2 + 1, c2 + 1)
+            .. (b and string.sub(B64, c3 + 1, c3 + 1) or "") .. (c and string.sub(B64, c4 + 1, c4 + 1) or ""))
+        i = i + 3
+    end
+    return table.concat(out)
+end
+
+local function b64dec(s)
+    s = string.gsub(s, "[^%w%+/]", "")
+    local out = {}
+    local n = string.len(s)
+    local i = 1
+    while i <= n do
+        local c1 = B64R[string.sub(s, i, i)]
+        local c2 = B64R[string.sub(s, i + 1, i + 1)]
+        local c3 = B64R[string.sub(s, i + 2, i + 2)]
+        local c4 = B64R[string.sub(s, i + 3, i + 3)]
+        if not (c1 and c2) then return nil end
+        local v = c1 * 262144 + c2 * 4096 + (c3 or 0) * 64 + (c4 or 0)
+        table.insert(out, string.char(math.floor(v / 65536)))
+        if c3 then table.insert(out, string.char(math.mod(math.floor(v / 256), 256))) end
+        if c4 then table.insert(out, string.char(math.mod(v, 256))) end
+        i = i + 4
+    end
+    return table.concat(out)
+end
+
+-- {"key"=value;#3=value;} - strings quoted, numbers n1.5, booleans T/F.
+-- Keys beginning with "__" and anything that is not data (functions, the
+-- TabView proxy flag) are left out.
+local function serStr(s)
+    local r = string.gsub(s, "\\", "\\\\")
+    r = string.gsub(r, '"', '\\"')
+    return '"' .. r .. '"'
+end
+
+local function serialize(v, out)
+    local t = type(v)
+    if t == "table" then
+        table.insert(out, "{")
+        for k, x in pairs(v) do
+            local kt, xt = type(k), type(x)
+            if (kt == "string" or kt == "number")
+                and (xt == "table" or xt == "string" or xt == "number" or xt == "boolean")
+                and not (kt == "string" and string.sub(k, 1, 2) == "__") then
+                if kt == "number" then table.insert(out, "#" .. k) else table.insert(out, serStr(k)) end
+                table.insert(out, "=")
+                serialize(x, out)
+                table.insert(out, ";")
+            end
+        end
+        table.insert(out, "}")
+    elseif t == "string" then table.insert(out, serStr(v))
+    elseif t == "number" then table.insert(out, "n" .. v)
+    elseif t == "boolean" then table.insert(out, v and "T" or "F")
+    end
+end
+
+-- Returns value, next position; nil when the text is not what serialize wrote.
+local function parse(s, pos)
+    local c = string.sub(s, pos, pos)
+    if c == "T" then return true, pos + 1 end
+    if c == "F" then return false, pos + 1 end
+    if c == "n" then
+        local _, e, num = string.find(s, "^([%-%d%.eE%+]+)", pos + 1)
+        if not e then return nil end
+        return tonumber(num), e + 1
+    end
+    if c == '"' then
+        local i = pos + 1
+        local buf = {}
+        while true do
+            local ch = string.sub(s, i, i)
+            if ch == "" then return nil end
+            if ch == "\\" then table.insert(buf, string.sub(s, i + 1, i + 1)); i = i + 2
+            elseif ch == '"' then return table.concat(buf), i + 1
+            else table.insert(buf, ch); i = i + 1 end
+        end
+    end
+    if c == "{" then
+        local t = {}
+        local i = pos + 1
+        while true do
+            local ch = string.sub(s, i, i)
+            if ch == "}" then return t, i + 1 end
+            if ch == "" then return nil end
+            local k
+            if ch == "#" then
+                local _, e, num = string.find(s, "^([%-%d%.eE%+]+)", i + 1)
+                if not e then return nil end
+                k = tonumber(num); i = e + 1
+            elseif ch == '"' then
+                k, i = parse(s, i)
+                if k == nil then return nil end
+            else
+                return nil
+            end
+            if string.sub(s, i, i) ~= "=" then return nil end
+            local v
+            v, i = parse(s, i + 1)
+            if v == nil then return nil end
+            t[k] = v
+            if string.sub(s, i, i) ~= ";" then return nil end
+            i = i + 1
+        end
+    end
+    return nil
+end
+
+-- The string for one saved profile, or nil and a reason.
+function Aegis_SBR:ExportProfile(name)
+    local cfg = AegisDB and AegisDB.profiles and name and AegisDB.profiles[name]
+    if not cfg then return nil, "profile '" .. tostring(name) .. "' not found" end
+    local class = (self.active and self.active.classToken) or "?"
+    local out = {}
+    serialize({ name = name, ver = self.ver, class = class, cfg = cfg }, out)
+    return "AEGIS1:" .. class .. ":" .. b64enc(table.concat(out))
+end
+
+-- Creates a profile from a string; returns its name and the version it was
+-- written by, or nil and a reason. Nothing is activated.
+function Aegis_SBR:ImportProfile(text)
+    text = string.gsub(text or "", "%s", "")
+    local _, _, class, payload = string.find(text, "^AEGIS1:(%u+):(.+)$")
+    if not payload then return nil, "not an Aegis profile string" end
+    local mine = self.active and self.active.classToken
+    if class ~= mine then return nil, "a " .. class .. " profile; this character is a " .. tostring(mine) end
+    local raw = b64dec(payload)
+    local rec = raw and parse(raw, 1)
+    if type(rec) ~= "table" or type(rec.cfg) ~= "table" then return nil, "the string is damaged" end
+    if type(AegisDB) ~= "table" then AegisDB = {} end
+    if type(AegisDB.profiles) ~= "table" then AegisDB.profiles = {} end
+    local name = (type(rec.name) == "string" and rec.name ~= "") and rec.name or "Imported"
+    local base, n = name, 2
+    while AegisDB.profiles[name] do name = base .. " (" .. n .. ")"; n = n + 1 end
+    AegisDB.profiles[name] = self:CopyProfile(rec.cfg)
+    self.validCacheName = nil
+    return name, rec.ver
+end
+
+-- /sbr export [name] and /sbr import: the window when the UI file is loaded,
+-- chat otherwise (the string is long, but the chat frame takes it).
+function Aegis_SBR:CmdExport(name)
+    if not name or name == "" then name = AegisDB and AegisDB.active end
+    if not name then msgOut("usage: /sbr export <profile>  (no profile is active).", 1, 0.5, 0.3); return end
+    local str, why = self:ExportProfile(name)
+    if not str then msgOut(why, 1, 0.5, 0.3); return end
+    if Aegis_SBR_UI and Aegis_SBR_UI.ShowTransfer then
+        Aegis_SBR_UI:ShowTransfer("export", str, name)
+    else
+        msgOut("profile '" .. name .. "':")
+        msgOut(str, 0.7, 0.7, 0.7)
+    end
+end
+
+function Aegis_SBR:CmdImport()
+    if Aegis_SBR_UI and Aegis_SBR_UI.ShowTransfer then
+        Aegis_SBR_UI:ShowTransfer("import")
+    else
+        msgOut("the import window needs Aegis_SBR_UI.lua.", 1, 0.5, 0.3)
+    end
+end
+
+-- ============================================================
 -- Generic profile commands (the text interface, UI is primary)
 -- ============================================================
 function Aegis_SBR:CmdList()
@@ -3383,6 +3576,8 @@ function Aegis_SBR:EvalCommand(msg)
     if cmd == "use"   then self:CmdUse(t[2]); return end
     if cmd == "off" or cmd == "none" then self:CmdOff(); return end
     if cmd == "new"   then self:CmdNew(t[2], string.lower(t[3] or "")); return end
+    if cmd == "export" then self:CmdExport(self:JoinFrom(t, 2)); return end
+    if cmd == "import" then self:CmdImport(); return end
     if cmd == "del" or cmd == "delete" then self:CmdDel(t[2]); return end
     if cmd == "check" then self:CmdCheck(); return end
     if cmd == "reset" then self:CmdReset(); return end

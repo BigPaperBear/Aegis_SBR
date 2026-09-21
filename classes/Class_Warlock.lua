@@ -2162,7 +2162,9 @@ function M:Rotate(cfg)
             if not self.stConsumed then
                 -- Instant off the proc, so it occupies the client for a global
                 -- cooldown and not for Shadow Bolt's three seconds.
-                if self:Queue("Shadow Bolt", "Nightfall proc", 0) then
+                local r = self:Queue("Shadow Bolt", "Nightfall proc", 0)
+                if r == "held" then return end
+                if r then
                     if self:Tracing() then self:Trace("trance SENT Shadow Bolt") end
                     self:Later(function()
                         self.stConsumed = true
@@ -2455,7 +2457,15 @@ function M:Rotate(cfg)
                     end
                 end
             end
-            if self:Queue("Dark Harvest", "mana from the channel") then
+            -- A hold (see Queue: the global cooldown of the DoT just sent is
+            -- still running) is truthy but not a send. Stamped as one, the
+            -- guard at the top of Rotate waited its window for a channel that
+            -- was never sent, declared the send dead, and backed off for
+            -- three seconds - in which the gap channel stood down for a Dark
+            -- Harvest that read as ready. Reported as four seconds of nothing
+            -- after every set of DoTs, and Drain Life never seen.
+            local r = self:Queue("Dark Harvest", "mana from the channel")
+            if r == true then
                 self:Later(function()
                     self.dhStart = GetTime()
                     self.dhEnd = self.dhStart + self:DHChannelLength()
@@ -2516,7 +2526,14 @@ function M:Rotate(cfg)
             -- hold Dark Harvest up for half its cooldown. So the limit is on the
             -- OVERRUN rather than on fitting: a short channel goes ahead, a long
             -- one stands down.
-            local overrun = len - self:OwnCDLeft("Dark Harvest")
+            -- While a failed send backs off, Dark Harvest is not coming back
+            -- before the backoff ends whatever its cooldown says.
+            local dhBack = self:OwnCDLeft("Dark Harvest")
+            if self.dhFailedAt then
+                local left = DH_RETRY_BACKOFF - (GetTime() - self.dhFailedAt)
+                if left > dhBack then dhBack = left end
+            end
+            local overrun = len - dhBack
             if overrun <= DH_OVERRUN_MAX then
                 if self:Queue(gap, "gap channel") then return end
                 -- Refused (moving, out of range, locked out - see ChannelRefusal).

@@ -4,7 +4,7 @@ All notable changes to **Aegis: Single Button Rotation** (formerly **AutoRota**)
 
 ---
 
-## v1.2.36 — immunities are remembered
+## v1.2.36 — immunities are remembered, profiles travel as text
 
 ### ✨ A learned immunity table, shared by the account
 
@@ -29,6 +29,30 @@ sessions and characters - one wasted cast per kind of mob ever.
 - The rogue's stealth opener on a learned mob is Hemorrhage, before Vanish as after it. The
   warlock's per-fight list and the hunter's and druid's own memories stay in place; the
   shared table is asked first.
+
+### ✨ Share a profile as text
+
+A 1.12 addon reads and writes no files, so a profile travels as a string. **Share** in the
+profile row (or `/sbr export [name]`) opens a window with the saved profile as
+`AEGIS1:<class>:<data>` - selected, Ctrl+C - and the same window takes a string pasted in
+(`/sbr import`, or Share and paste): **Import** creates it as a new profile under its stored
+name, numbered when taken, and loads it into the panel without activating it. Everything the
+profile holds goes with it - the tab layers, the AoE column, spells and seals; nothing
+character-bound (targeting mode, assist name, logs) is inside. A string from an older version
+gets today's defaults for what it lacks. The class is checked on import. The encoding carries
+no characters Discord rewrites, and whitespace is dropped on the way back in.
+
+### 🐛 Warlock — four seconds of nothing after the DoTs
+
+With *Dark Harvest* as the filler the rotation stood still after every set of DoTs, cast Dark
+Harvest late, and never reached the *between channels* Drain Life. The global-cooldown hold
+from v1.2.33 (a press inside the running cooldown is held, not sent) was taken for a send at
+the Dark Harvest site: the channel's stamps went down for a spell that never left, the guard
+waited its window for a channel that could not come, declared the send dead and backed off
+for three seconds - in which the gap channel stood down for a Dark Harvest that read as
+ready. Now only a real send is stamped, a held Dark Harvest goes out on the press after the
+cooldown, and during a genuine backoff the gap channel counts the backoff, so Drain Life
+runs. The Nightfall Shadow Bolt had the same flaw: a held send marked the proc as spent.
 
 ---
 

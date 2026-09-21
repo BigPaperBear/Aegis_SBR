@@ -1271,6 +1271,97 @@ function Aegis_SBR_UI:ShowDialog(opts)
     if opts.withInput then d.eb:SetFocus() end
 end
 
+-- ------------------------------------------------------------
+-- transfer window: a profile as text, out and in
+-- ------------------------------------------------------------
+function Aegis_SBR_UI:EnsureTransfer()
+    if self.xfer then return end
+    local d = CreateFrame("Frame", "Aegis_SBR_Transfer", UIParent)
+    d:SetWidth(440); d:SetHeight(300)
+    d:SetPoint("CENTER", UIParent, "CENTER", 0, 80)
+    d:SetBackdrop(FLAT_BACKDROP)
+    d:SetBackdropColor(PAL.panel[1], PAL.panel[2], PAL.panel[3], 0.99)
+    SkinBorder(d)
+    d:SetFrameStrata("FULLSCREEN_DIALOG")
+    d:EnableMouse(true)
+    d:SetMovable(true)
+    d:RegisterForDrag("LeftButton")
+    d:SetScript("OnDragStart", function() d:StartMoving() end)
+    d:SetScript("OnDragStop", function() d:StopMovingOrSizing() end)
+    d:Hide()
+    local title = FS(d, "GameFontNormal", ""); title:SetPoint("TOP", d, "TOP", 0, -16)
+    d.title = title
+    local hint = FS(d, "GameFontNormalSmall", ""); hint:SetPoint("TOP", title, "BOTTOM", 0, -6)
+    hint:SetWidth(400); hint:SetJustifyH("CENTER")
+    hint:SetTextColor(0.7, 0.7, 0.7)
+    d.hint = hint
+    -- A multi-line edit box inside a scroll frame; the FrameXML helpers keep
+    -- the cursor in view.
+    local sf = CreateFrame("ScrollFrame", "Aegis_SBR_TransferScroll", d, "UIPanelScrollFrameTemplate")
+    sf:SetPoint("TOPLEFT", d, "TOPLEFT", 20, -62)
+    sf:SetPoint("BOTTOMRIGHT", d, "BOTTOMRIGHT", -40, 52)
+    local eb = CreateFrame("EditBox", "Aegis_SBR_TransferEdit", sf)
+    eb:SetWidth(360); eb:SetHeight(180)
+    eb:SetMultiLine(true)
+    eb:SetAutoFocus(false)
+    eb:SetFontObject(ChatFontNormal)
+    eb:SetMaxLetters(0)
+    eb:SetScript("OnEscapePressed", function() d:Hide() end)
+    eb:SetScript("OnTextChanged", function() if ScrollingEdit_OnTextChanged then ScrollingEdit_OnTextChanged() end end)
+    eb:SetScript("OnCursorChanged", function() if ScrollingEdit_OnCursorChanged then ScrollingEdit_OnCursorChanged(arg1, arg2, arg3, arg4) end end)
+    eb:SetScript("OnUpdate", function() if ScrollingEdit_OnUpdate then ScrollingEdit_OnUpdate(sf) end end)
+    sf:SetScrollChild(eb)
+    d.eb = eb
+    local ok = CreateFrame("Button", nil, d, "UIPanelButtonTemplate")
+    ok:SetWidth(100); ok:SetHeight(24); ok:SetPoint("BOTTOMLEFT", d, "BOTTOMLEFT", 24, 16)
+    d.ok = ok
+    local close = CreateFrame("Button", nil, d, "UIPanelButtonTemplate")
+    close:SetWidth(100); close:SetHeight(24); close:SetPoint("BOTTOMRIGHT", d, "BOTTOMRIGHT", -24, 16)
+    close:SetText("Close")
+    close:SetScript("OnClick", function() d:Hide() end)
+    SkinButton(ok, "accent")
+    SkinButton(close, "ghost")
+    self.xfer = d
+end
+
+-- mode "export": the string, selected, ready for Ctrl+C. Mode "import": an
+-- empty field to paste into; Import creates the profile and loads it.
+function Aegis_SBR_UI:ShowTransfer(mode, text, name)
+    self:EnsureTransfer()
+    local d = self.xfer
+    if mode == "export" then
+        d.title:SetText("Share '" .. tostring(name) .. "'")
+        d.hint:SetText("Ctrl+C copies the selected text. Send it to another player of your class; they paste it here and press Import.")
+        d.eb:SetText(text or "")
+        d.ok:SetText("Import")
+    else
+        d.title:SetText("Import a profile")
+        d.hint:SetText("Paste a profile string (Ctrl+V) and press Import. It becomes a new profile; nothing is activated.")
+        d.eb:SetText("")
+        d.ok:SetText("Import")
+    end
+    d.ok:SetScript("OnClick", function()
+        local newName, ver = CORE:ImportProfile(d.eb:GetText())
+        if not newName then
+            DEFAULT_CHAT_FRAME:AddMessage("Aegis: cannot import - " .. tostring(ver) .. ".", 1, 0.5, 0.3)
+            return
+        end
+        DEFAULT_CHAT_FRAME:AddMessage("Aegis: imported '" .. newName .. "'" .. (ver and (" (written by v" .. tostring(ver) .. ")") or "") .. ". Activate it when you want the macro to use it.")
+        d:Hide()
+        if Aegis_SBR_UI.built then Aegis_SBR_UI:Load(newName) end
+    end)
+    d:Show(); d:Raise()
+    d.eb:SetFocus()
+    if mode == "export" then d.eb:HighlightText() end
+end
+
+function Aegis_SBR_UI:OpenShare()
+    if not self.editing then return end
+    local str, why = CORE:ExportProfile(self.editing)
+    if not str then DEFAULT_CHAT_FRAME:AddMessage("Aegis: " .. tostring(why) .. ".", 1, 0.5, 0.3); return end
+    self:ShowTransfer("export", str, self.editing)
+end
+
 -- ============================================================
 -- build (shell, then class body)
 -- ============================================================
@@ -1503,6 +1594,8 @@ function Aegis_SBR_UI:Build()
         "|cffFFD100/sbr use <name>|r - activate a profile\n" ..
         "|cffFFD100/sbr new <name>|r - create a profile\n" ..
         "|cffFFD100/sbr del <name>|r - delete a profile\n" ..
+        "|cffFFD100/sbr export [name]|r - a profile as text to share\n" ..
+        "|cffFFD100/sbr import|r - paste a shared profile\n" ..
         "|cffFFD100/sbr off|r - stop using any profile\n\n" ..
         "|cffFFD100Troubleshooting|r\n" ..
         "|cffFFD100/sbr check|r - sanity-check the active profile\n" ..
@@ -1544,14 +1637,19 @@ function Aegis_SBR_UI:Build()
 
     -- management buttons
     self.delBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-    self.delBtn:SetWidth(52); self.delBtn:SetHeight(20); self.delBtn:SetPoint("TOPRIGHT", f, "TOPRIGHT", -14, -49)
+    self.delBtn:SetWidth(50); self.delBtn:SetHeight(20); self.delBtn:SetPoint("TOPRIGHT", f, "TOPRIGHT", -14, -49)
     self.delBtn:SetText("Delete"); self.delBtn:SetScript("OnClick", function() self:AskDelete() end)
     self.renBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-    self.renBtn:SetWidth(58); self.renBtn:SetHeight(20); self.renBtn:SetPoint("RIGHT", self.delBtn, "LEFT", -6, 0)
+    self.renBtn:SetWidth(56); self.renBtn:SetHeight(20); self.renBtn:SetPoint("RIGHT", self.delBtn, "LEFT", -6, 0)
     self.renBtn:SetText("Rename"); self.renBtn:SetScript("OnClick", function() self:AskRename() end)
     self.newBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-    self.newBtn:SetWidth(46); self.newBtn:SetHeight(20); self.newBtn:SetPoint("RIGHT", self.renBtn, "LEFT", -6, 0)
+    self.newBtn:SetWidth(42); self.newBtn:SetHeight(20); self.newBtn:SetPoint("RIGHT", self.renBtn, "LEFT", -6, 0)
     self.newBtn:SetText("New"); self.newBtn:SetScript("OnClick", function() self:AskNew() end)
+    -- Share: the profile being edited as a string to hand to other players,
+    -- and the field to paste one of theirs into.
+    self.shareBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+    self.shareBtn:SetWidth(46); self.shareBtn:SetHeight(20); self.shareBtn:SetPoint("RIGHT", self.newBtn, "LEFT", -6, 0)
+    self.shareBtn:SetText("Share"); self.shareBtn:SetScript("OnClick", function() self:OpenShare() end)
 
     self.statusDot = f:CreateTexture(nil, "ARTWORK")
     self.statusDot:SetTexture("Interface\\AddOns\\Aegis_SBR\\Icons\\SliderThumb")
@@ -1578,6 +1676,7 @@ function Aegis_SBR_UI:Build()
     -- (it changes what the macro does); everything else is a quiet ghost.
     SkinButton(self.activateBtn, "accent")
     SkinButton(self.newBtn, "ghost")
+    SkinButton(self.shareBtn, "ghost")
     SkinButton(self.renBtn, "ghost")
     SkinButton(self.delBtn, "ghost")
     SkinButton(self.saveBtn, "ghost")
@@ -1587,6 +1686,7 @@ function Aegis_SBR_UI:Build()
     Tip(self.activateBtn, "Activate", "Saves this profile and makes the macro use it.", "The macro always runs the active profile.")
     Tip(self.saveBtn, "Save", "Stores your changes to this profile.", "Does not change which profile the macro uses.")
     Tip(self.newBtn, "New", "Creates a new profile from a blank starter.")
+    Tip(self.shareBtn, "Share", "This profile as a text string to copy and send to other players - and the field to paste theirs into.", "Only what is saved goes out; Save first. Nothing character-bound is in the string.")
     Tip(self.renBtn, "Rename", "Renames the profile being edited.")
     Tip(self.delBtn, "Delete", "Deletes the profile being edited, after a prompt.")
 
