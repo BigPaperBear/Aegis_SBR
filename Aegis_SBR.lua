@@ -17,7 +17,7 @@
 -- ============================================================
 
 Aegis_SBR = {
-    ver = "1.2.35",
+    ver = "1.2.36",
     classes = {},     -- token -> module table
     active = nil,      -- the module for this character's class
     Loaded = false,
@@ -673,6 +673,113 @@ function Aegis_SBR:LogInit(reset)
         AegisLog.max = LOG_MAX
     end
     return AegisLog
+end
+
+-- ============================================================
+-- Learned immunities (AegisImmune, one table for the account)
+--
+-- The client says outright when a spell failed because the target was immune
+-- ("Your Garrote failed. X is immune."), and an immunity belongs to the kind
+-- of mob, not to the one in front of you. So it is kept by mob name, across
+-- sessions and characters: one wasted cast per kind of mob ever, not one per
+-- fight. Each class module names the spells it wants learned (M.LEARN_IMMUNE:
+-- the DoTs and bleeds it sends itself); every other "immune" line - weapon
+-- poisons, procs, spells the module does not send - is ignored. Bleeds are one
+-- group: a mob immune to Garrote is immune to Rip.
+--
+-- Not learned while something OUTSIDE the list reported "immune" within a few
+-- seconds, before or after: a boss in a shield phase refuses everything, and
+-- that is the phase, not the mob. /sbr immune lists the table, forget <name>
+-- and clear prune it.
+-- ============================================================
+local IMMUNE_MAX = 300
+local IMMUNE_OTHER_WINDOW = 3.0
+local IMMUNE_GROUP = {
+    ["Garrote"] = "bleed", ["Rupture"] = "bleed", ["Rip"] = "bleed", ["Rake"] = "bleed",
+    ["Rend"] = "bleed", ["Deep Wounds"] = "bleed",
+}
+
+function Aegis_SBR:ImmuneTable()
+    if type(AegisImmune) ~= "table" then AegisImmune = {} end
+    return AegisImmune
+end
+
+-- Is the unit (the target unless said otherwise) known immune to this spell,
+-- or to a spell of the same group?
+function Aegis_SBR:KnownImmune(spell, unit)
+    local name = UnitName(unit or "target")
+    if not name then return false end
+    local e = self:ImmuneTable()[name]
+    if not e then return false end
+    if e[spell] then return true end
+    local g = IMMUNE_GROUP[spell]
+    if g then
+        for other, _ in pairs(e) do
+            if IMMUNE_GROUP[other] == g then return true end
+        end
+    end
+    return false
+end
+
+-- Records the immunity; true when it is new.
+function Aegis_SBR:NoteImmune(name, spell)
+    local t = self:ImmuneTable()
+    if not t[name] then
+        local n = 0
+        for _ in pairs(t) do n = n + 1 end
+        if n >= IMMUNE_MAX then return false end
+        t[name] = {}
+    end
+    if t[name][spell] then return false end
+    t[name][spell] = (date and date("%Y-%m-%d")) or "-"
+    self:Msg(name .. " is immune to " .. spell .. " - remembered (/sbr immune).", 0.7, 0.7, 0.7)
+    return true
+end
+
+-- Drops one mob's entry, matched without regard to case; true when found.
+function Aegis_SBR:ForgetImmune(name)
+    local t = self:ImmuneTable()
+    local want = string.lower(name or "")
+    for mob, _ in pairs(t) do
+        if string.lower(mob) == want then t[mob] = nil; return true end
+    end
+    return false
+end
+
+-- Combat-log reader for the table. "Your <spell> failed. <mob> is immune."
+-- for a spell; the auto-attack line has no spell and counts as "something
+-- else". Entries made within the window before an outside "immune" line are
+-- withdrawn again.
+Aegis_SBR.immuneRecent = {}
+Aegis_SBR.immuneOtherAt = -100
+function Aegis_SBR:OnImmuneLine(line)
+    if not line or not string.find(line, "immune") then return end
+    local now = GetTime()
+    local _, _, spell = string.find(line, "^Your (.-) failed")
+    local list = self.active and self.active.LEARN_IMMUNE
+    if not (spell and list and list[spell]) then
+        self.immuneOtherAt = now
+        local t = self:ImmuneTable()
+        for i = table.getn(self.immuneRecent), 1, -1 do
+            local r = self.immuneRecent[i]
+            if now - r.t <= IMMUNE_OTHER_WINDOW then
+                local e = t[r.name]
+                if e then
+                    e[r.spell] = nil
+                    if not next(e) then t[r.name] = nil end
+                    self:Msg(r.name .. ": " .. r.spell .. " not remembered - everything was immune just then.", 0.7, 0.7, 0.7)
+                end
+            end
+            table.remove(self.immuneRecent, i)
+        end
+        return
+    end
+    local tname = UnitName("target")
+    if not (tname and string.find(line, tname, 1, true)) then return end
+    if now - self.immuneOtherAt <= IMMUNE_OTHER_WINDOW then return end
+    if self:NoteImmune(tname, spell) then
+        table.insert(self.immuneRecent, { name = tname, spell = spell, t = now })
+    end
 end
 
 -- Append one line. Timestamps are seconds since the log was (re)started, so
@@ -3347,6 +3454,37 @@ function Aegis_SBR:EvalCommand(msg)
         return
     end
     if cmd == "deps" or cmd == "components" then self:CmdDeps(); return end
+    if cmd == "immune" then
+        local sub = string.lower(t[2] or "")
+        if sub == "clear" then
+            AegisImmune = {}
+            msgOut("immunity table cleared.")
+        elseif sub == "forget" then
+            local name = table.concat(t, " ", 3)
+            if name == "" then name = UnitName("target") or "" end
+            if name == "" then msgOut("usage: /sbr immune forget <mob name>  (or target the mob).", 1, 0.5, 0.3); return end
+            if self:ForgetImmune(name) then msgOut(name .. " forgotten.")
+            else msgOut(name .. " is not in the table.", 1, 0.5, 0.3) end
+        else
+            local tbl = self:ImmuneTable()
+            local names = {}
+            for mob, _ in pairs(tbl) do table.insert(names, mob) end
+            table.sort(names)
+            if table.getn(names) == 0 then
+                msgOut("no immunities learned yet. They are recorded from \"Your <spell> failed. <mob> is immune.\" for the DoTs and bleeds the rotation sends.")
+            else
+                msgOut("learned immunities (" .. table.getn(names) .. "):")
+                for _, mob in ipairs(names) do
+                    local spells = {}
+                    for sp, when in pairs(tbl[mob]) do table.insert(spells, sp .. " (" .. tostring(when) .. ")") end
+                    table.sort(spells)
+                    msgOut("  " .. mob .. ": " .. table.concat(spells, ", "), 0.7, 0.7, 0.7)
+                end
+            end
+            msgOut("usage: /sbr immune [forget <mob name>|clear]", 0.7, 0.7, 0.7)
+        end
+        return
+    end
     if cmd == "move" or cmd == "movement" then
         local sub = string.lower(t[2] or "")
         if sub == "on" then
@@ -3602,6 +3740,7 @@ ev:RegisterEvent("SPELLS_CHANGED")
 ev:RegisterEvent("CHARACTER_POINTS_CHANGED")
 ev:RegisterEvent("CHAT_MSG_COMBAT_SELF_HITS")
 ev:RegisterEvent("CHAT_MSG_COMBAT_SELF_MISSES")
+ev:RegisterEvent("CHAT_MSG_SPELL_SELF_DAMAGE")   -- "Your X failed. Y is immune."
 ev:RegisterEvent("PLAYER_REGEN_ENABLED")
 -- Gear changed: the weapon a step depends on may have.
 ev:RegisterEvent("UNIT_INVENTORY_CHANGED")
@@ -3649,6 +3788,9 @@ ev:SetScript("OnEvent", function()
         Aegis_SBR.validCacheName = nil
     elseif event == "CHAT_MSG_COMBAT_SELF_HITS" or event == "CHAT_MSG_COMBAT_SELF_MISSES" then
         if Aegis_SBR.active then Aegis_SBR.active:OnSwingMessage(arg1) end
+        Aegis_SBR:OnImmuneLine(arg1)
+    elseif event == "CHAT_MSG_SPELL_SELF_DAMAGE" then
+        Aegis_SBR:OnImmuneLine(arg1)
     elseif event == "UNIT_INVENTORY_CHANGED" then
         if arg1 == "player" or arg1 == nil then Aegis_SBR:ClearEquipCache() end
     elseif event == "UI_ERROR_MESSAGE" then

@@ -376,8 +376,12 @@ M.DOT_DUR = {
     ["Holy Fire"]         = 10,
 }
 
+-- Learned by the core from "Your Shadow Word: Pain failed. X is immune." and
+-- kept by mob name across sessions (/sbr immune).
+M.LEARN_IMMUNE = { ["Shadow Word: Pain"] = true, ["Vampiric Embrace"] = true }
 function M:ApplyDot(spellName, texFrag, interval)
     interval = interval or 3
+    if Aegis_SBR.KnownImmune and Aegis_SBR:KnownImmune(spellName) then return "up" end
     -- Ours, or another priest's? Shadow Word: Pain, Devouring Plague and Holy
     -- Fire are all per-caster, so somebody else's answering for ours means
     -- applying nothing for as long as they keep theirs up.

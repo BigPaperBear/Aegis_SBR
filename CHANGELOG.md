@@ -4,6 +4,34 @@ All notable changes to **Aegis: Single Button Rotation** (formerly **AutoRota**)
 
 ---
 
+## v1.2.36 — immunities are remembered
+
+### ✨ A learned immunity table, shared by the account
+
+The client says outright when a spell failed because the target was immune, and an
+immunity belongs to the kind of mob, not to the one in front of you. Until now each module
+learned it for itself: the warlock for twenty seconds, the hunter for the fight, the druid per
+character. Now the core keeps one table (`AegisImmune`, account-wide), by mob name, across
+sessions and characters - one wasted cast per kind of mob ever.
+
+- Recorded from `Your <spell> failed. <mob> is immune.`, only for the DoTs and bleeds the
+  rotation sends itself: Garrote (rogue); Corruption, Curse of Agony, Immolate, Siphon Life,
+  Drain Life (warlock); Serpent Sting (hunter); Shadow Word: Pain, Vampiric Embrace (priest);
+  Rip, Rake, Moonfire, Insect Swarm (druid). Weapon poisons, procs and everything else that
+  reports "immune" are ignored.
+- Bleeds are one group: a mob immune to Garrote is immune to Rip and Rake. Rupture is still
+  cast on such a target - Taste for Blood does not need the bleed to land.
+- A shield phase is not a mob: while anything outside that list reported "immune" within
+  three seconds - the auto-attack, a Shadow Bolt, a Hemorrhage - nothing is learned, and an
+  entry made just before is withdrawn again. Every entry and every withdrawal is said in chat.
+- `/sbr immune` lists the table with the date of each entry, `/sbr immune forget <name>`
+  (or with the mob targeted) drops one, `/sbr immune clear` all.
+- The rogue's stealth opener on a learned mob is Hemorrhage, before Vanish as after it. The
+  warlock's per-fight list and the hunter's and druid's own memories stay in place; the
+  shared table is asked first.
+
+---
+
 ## v1.2.35 — every tab keeps its own settings, and the Subtlety rogue plays the raid rotation
 
 ### 🐛 A tab's settings were everybody's

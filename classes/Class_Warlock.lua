@@ -1513,7 +1513,13 @@ M.dotImmune = {}
 -- immunity costs one re-learning cast per window, which is cheap.
 local IMMUNE_TTL = 20.0
 
+M.LEARN_IMMUNE = { ["Corruption"] = true, ["Curse of Agony"] = true, ["Immolate"] = true,
+    ["Siphon Life"] = true, ["Drain Life"] = true }
 function M:DotImmune(spellName)
+    -- Kept across fights by the core, by mob name (/sbr immune). A phase
+    -- immunity is not written there: the core withholds the entry while
+    -- anything else reported "immune" at the same time.
+    if Aegis_SBR.KnownImmune and Aegis_SBR:KnownImmune(spellName) then return true end
     local _, guid = UnitExists("target")
     if not guid then return false end
     local at = self.dotImmune[guid .. "|" .. spellName]
@@ -1564,6 +1570,7 @@ function M:LifeDrainImmune()
         self.drainImmune = (UnitCreatureType("target") == "Mechanical")
     end
     if self.drainImmune then return true end
+    if Aegis_SBR.KnownImmune and Aegis_SBR:KnownImmune("Drain Life") then return true end
     return self:DotImmune("Siphon Life")
 end
 

@@ -494,7 +494,12 @@ function M:ImmuneKey(spell)
     return nm and ("nm:" .. nm .. "|" .. spell) or nil
 end
 
+-- The core's account-wide table first (/sbr immune, learned from the same
+-- combat-log line for the four debuffs below); this module's older
+-- per-character memory still answers for what it learned before.
+M.LEARN_IMMUNE = { ["Rip"] = true, ["Rake"] = true, ["Moonfire"] = true, ["Insect Swarm"] = true }
 function M:LearnedImmune(spell)
+    if Aegis_SBR.KnownImmune and Aegis_SBR:KnownImmune(spell) then return true end
     local mem = self:ImmuneMemory()
     local key = mem and self:ImmuneKey(spell)
     return (key and mem[key]) and true or false
