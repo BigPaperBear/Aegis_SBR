@@ -2,8 +2,9 @@
 ## Title: Aegis: Single Button Rotation
 ## Notes: Configurable one-button rotation, multi class (Turtle WoW 1.18.1 (1.12 client) / SuperWoW). Formerly AutoRota.
 ## Author: Mercaius & Subtilizer (Torchlite)
-## Version: 1.2.35
+## Version: 1.2.36
 ## SavedVariablesPerCharacter: AegisDB, AutoRotaDB, AegisLog, AegisProbe
+## SavedVariables: AegisImmune
 
 Aegis_SBR.lua
 Aegis_SBR_Capabilities.lua

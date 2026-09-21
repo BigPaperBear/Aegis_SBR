@@ -4,6 +4,58 @@ All notable changes to **Aegis: Single Button Rotation** (formerly **AutoRota**)
 
 ---
 
+## v1.2.36 — immunities are remembered, profiles travel as text
+
+### ✨ A learned immunity table, shared by the account
+
+The client says outright when a spell failed because the target was immune, and an
+immunity belongs to the kind of mob, not to the one in front of you. Until now each module
+learned it for itself: the warlock for twenty seconds, the hunter for the fight, the druid per
+character. Now the core keeps one table (`AegisImmune`, account-wide), by mob name, across
+sessions and characters - one wasted cast per kind of mob ever.
+
+- Recorded from `Your <spell> failed. <mob> is immune.`, only for the DoTs and bleeds the
+  rotation sends itself: Garrote (rogue); Corruption, Curse of Agony, Immolate, Siphon Life,
+  Drain Life (warlock); Serpent Sting (hunter); Shadow Word: Pain, Vampiric Embrace (priest);
+  Rip, Rake, Moonfire, Insect Swarm (druid). Weapon poisons, procs and everything else that
+  reports "immune" are ignored.
+- Bleeds are one group: a mob immune to Garrote is immune to Rip and Rake. Rupture is still
+  cast on such a target - Taste for Blood does not need the bleed to land.
+- A shield phase is not a mob: while anything outside that list reported "immune" within
+  three seconds - the auto-attack, a Shadow Bolt, a Hemorrhage - nothing is learned, and an
+  entry made just before is withdrawn again. Every entry and every withdrawal is said in chat.
+- `/sbr immune` lists the table with the date of each entry, `/sbr immune forget <name>`
+  (or with the mob targeted) drops one, `/sbr immune clear` all.
+- The rogue's stealth opener on a learned mob is Hemorrhage, before Vanish as after it. The
+  warlock's per-fight list and the hunter's and druid's own memories stay in place; the
+  shared table is asked first.
+
+### ✨ Share a profile as text
+
+A 1.12 addon reads and writes no files, so a profile travels as a string. **Share** in the
+profile row (or `/sbr export [name]`) opens a window with the saved profile as
+`AEGIS1:<class>:<data>` - selected, Ctrl+C - and the same window takes a string pasted in
+(`/sbr import`, or Share and paste): **Import** creates it as a new profile under its stored
+name, numbered when taken, and loads it into the panel without activating it. Everything the
+profile holds goes with it - the tab layers, the AoE column, spells and seals; nothing
+character-bound (targeting mode, assist name, logs) is inside. A string from an older version
+gets today's defaults for what it lacks. The class is checked on import. The encoding carries
+no characters Discord rewrites, and whitespace is dropped on the way back in.
+
+### 🐛 Warlock — four seconds of nothing after the DoTs
+
+With *Dark Harvest* as the filler the rotation stood still after every set of DoTs, cast Dark
+Harvest late, and never reached the *between channels* Drain Life. The global-cooldown hold
+from v1.2.33 (a press inside the running cooldown is held, not sent) was taken for a send at
+the Dark Harvest site: the channel's stamps went down for a spell that never left, the guard
+waited its window for a channel that could not come, declared the send dead and backed off
+for three seconds - in which the gap channel stood down for a Dark Harvest that read as
+ready. Now only a real send is stamped, a held Dark Harvest goes out on the press after the
+cooldown, and during a genuine backoff the gap channel counts the backoff, so Drain Life
+runs. The Nightfall Shadow Bolt had the same flaw: a held send marked the proc as spent.
+
+---
+
 ## v1.2.35 — every tab keeps its own settings, and the Subtlety rogue plays the raid rotation
 
 ### 🐛 A tab's settings were everybody's

@@ -784,9 +784,12 @@ end
 
 -- Read-only: is a sting blocked on the current target right now? No side effects
 -- (used by the rotation gate and the trace line).
+M.LEARN_IMMUNE = { ["Serpent Sting"] = true }
 function M:StingImmuneNow()
     local ct = UnitCreatureType and UnitCreatureType("target")
     if ct and self.STING_IMMUNE_TYPES[ct] then return true end
+    -- The core's account-wide table (/sbr immune), by mob name.
+    if Aegis_SBR.KnownImmune and Aegis_SBR:KnownImmune("Serpent Sting") then return true end
     -- Learned per mob type first: it survives the fight, so this is the check
     -- that saves the wasted cast on every later specimen.
     if self:KnownImmuneType() then return true end

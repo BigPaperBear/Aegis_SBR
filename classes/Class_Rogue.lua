@@ -400,12 +400,14 @@ local CP_SECS_DEFAULT = 3.0
 -- the last builder, and a press or two.
 local CP_RESERVE_MARGIN = 2.5
 
--- Seconds left on Expose Armor for this target, or nil when it is not up.
 -- Mechanical and Elemental creatures take no bleed: Garrote is a bleed and
 -- is not opened with on them (the press from stealth goes to Hemorrhage).
 -- Rupture is still cast on them with Taste for Blood - the tooltip grants the
 -- buff "regardless of successful application". Cached per target; an unknown
--- type answers "not immune".
+-- type answers "not immune". What the type cannot tell - a boss immune by
+-- flag - the core's learned table does, from the one Garrote that failed on
+-- that kind of mob (Aegis_SBR:KnownImmune, /sbr immune).
+M.LEARN_IMMUNE = { ["Garrote"] = true }
 function M:TargetIsBleedImmune()
     local id = self:TargetId()
     if id ~= self.bleedTypeId then
@@ -413,7 +415,8 @@ function M:TargetIsBleedImmune()
         self.bleedTypeId = id
         self.bleedImmune = (t == "Mechanical" or t == "Elemental")
     end
-    return self.bleedImmune and true or false
+    if self.bleedImmune then return true end
+    return Aegis_SBR.KnownImmune and Aegis_SBR:KnownImmune("Garrote") or false
 end
 
 -- In stealth? The client's own flag where it exists, the buff otherwise.
