@@ -37,10 +37,11 @@ explicit paths. Never `git add -f .claude` — that would pick up `settings.loca
 ```bash
 git -C ../Aegis_SBR-agents add -f .claude/agents .claude/output-styles .claude/skills .claude/README.md
 git -C ../Aegis_SBR-agents commit -m "tooling: ..."
-git -C ../Aegis_SBR-agents push fork tooling/agent-family
+git -C ../Aegis_SBR-agents push
 ```
 
-The branch has no upstream on purpose; always name `fork` when pushing.
+The branch tracks `fork/tooling/agent-family`, so a bare `git push` goes to the fork, never to
+Torchlite-bit.
 
 ## ADHD skill
 
