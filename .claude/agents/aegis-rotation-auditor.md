@@ -1,6 +1,6 @@
 ---
 name: aegis-rotation-auditor
-description: Compares what an Aegis_SBR class module actually casts, and in what order, with the researched priorities in docs/rotations.md, and writes the Critical Rule #1 discrepancy report. Read-only; never proposes a change as done.
+description: "Compares what an Aegis_SBR class module actually casts, and in what order, with the researched priorities in docs/rotations.md, and writes the Critical Rule #1 discrepancy report. Read-only; never proposes a change as done."
 tools: Read, Grep, Glob
 model: opus
 effort: high
