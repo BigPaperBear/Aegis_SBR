@@ -22,7 +22,7 @@
 
 local M = Aegis_SBR:NewClassModule("ROGUE")
 M.uiTitle = "Rogue"
-M.uiHeight = 678
+M.uiHeight = 706
 
 -- Each panel tab keeps its own settings layer (Aegis_SBR:TabView): a change
 -- made on one tab stays on that tab.
@@ -183,6 +183,11 @@ function M:NormalizeProfile(c)
     -- is already over. 0 turns the measurement off and leaves the health
     -- percentage in sole charge, exactly as before this setting existed.
     if c.executeTTK == nil then c.executeTTK = 4 end
+    -- Rupture only on a target measured to live at least this long. Trash
+    -- in a raid dies before a Rupture (or the Taste for Blood it buys) pays
+    -- its five points back; there they go into Eviscerate. Off by default.
+    if c.useRuptureTTK == nil then c.useRuptureTTK = false end
+    if c.ruptureMinTTK == nil then c.ruptureMinTTK = 16 end
     -- Rupture carries its OWN combo-point threshold, deliberately separate from
     -- Eviscerate's: only Rupture's payoff (the Taste for Blood damage buff)
     -- scales with the points spent, and sharing Eviscerate's higher threshold
@@ -689,6 +694,16 @@ end
 
 -- Cold Blood belongs to the Eviscerate it is meant to turn into a crit, so it
 -- is attached to that plan rather than being a decision of its own.
+-- Seconds the target is measured to have left when that is shorter than the
+-- "Only if the target lives" line, else nil. An unknown time to kill (the
+-- first seconds of a fight, a target not losing health) never suppresses.
+function M:RuptureTooShort(cfg)
+    if not cfg.useRuptureTTK then return nil end
+    local ttk = Aegis_SBR:TargetTTK()
+    if ttk and ttk < (cfg.ruptureMinTTK or 16) then return ttk end
+    return nil
+end
+
 function M:FinisherPlan(cfg, cp, spell, reason, extras)
     if spell == "Eviscerate" and self:ColdBloodReady(cfg, cp) then
         extras = extras or {}
@@ -732,6 +747,8 @@ function M:Decide(cfg, tracing)
     local useSnd = cfg.useSnd and self:KnowsSpell("Slice and Dice")
     local useEnv = cfg.useEnvenom and self:KnowsSpell("Envenom")
     local useRup = cfg.useRupture and self:KnowsSpell("Rupture")
+    -- Dying too soon for it: no Rupture, the points go to Eviscerate below.
+    if useRup and self:RuptureTooShort(cfg) then useRup = false end
     local cpEvis = cfg.cpFinish or 4
 
     local cp = GetComboPoints("player", "target")
@@ -1041,6 +1058,11 @@ function M:DecideSubtlety(cfg, tracing)
     local sndLeft = useSnd and self:BuffTime("Slice and Dice") or 0
     local sndDue = useSnd and sndLeft <= (cfg.buffRenew or BUFF_RENEW)
     local useRup = cfg.useRupture and self:KnowsSpell("Rupture")
+    -- A target that dies before the "Only if the target lives" line gets no
+    -- Rupture at all - not for the bleed and not for Taste for Blood - and the
+    -- Mark stops waiting for the buff (tfbWait below reads useRup).
+    local rupShort = useRup and self:RuptureTooShort(cfg)
+    if rupShort then useRup = false end
     -- Rupture is due when Taste for Blood is under the same "Refresh when
     -- under" line as Slice and Dice - the slider on the panel, not the
     -- assassination path's ten second half-life: that re-cast Rupture every
@@ -1098,6 +1120,24 @@ function M:DecideSubtlety(cfg, tracing)
     -- points a quarter second later.
     if self.exposeCheck and cp >= (cfg.exposeCP or 5) then
         return plan(nil, "confirming Expose Armor", extras)
+    end
+
+    -- P0b Execute: the target is nearly dead, and the points on hand go into
+    -- Eviscerate before they die with it. The Execute section of the panel:
+    -- health line, the fewest points it may spend, and the brake that calls it
+    -- off below five points while the target is measured to live on. Ahead of
+    -- Expose Armor - a debuff on a dying target is thirty seconds nobody uses.
+    if cfg.useExecute and self:KnowsSpell("Eviscerate") and cp >= (cfg.executeMinCP or 1)
+        and self:TargetHPPct() <= (cfg.executeHpPct or 10) then
+        local ttk = Aegis_SBR:TargetTTK()
+        local brake = cp < 5 and (cfg.executeTTK or 0) > 0 and ttk and ttk > cfg.executeTTK
+        if not brake then
+            if not Aegis_SBR:CanAfford("Eviscerate") then
+                return plan(nil, "pooling energy for Eviscerate, execute", extras)
+            end
+            return self:FinisherPlan(cfg, cp, "Eviscerate",
+                "execute, target at " .. string.format("%.0f%%", self:TargetHPPct()) .. ", " .. cp .. " CP", extras)
+        end
     end
 
     -- P1 Expose Armor, ahead of every other finisher. Inside the reserve the
@@ -1165,6 +1205,16 @@ function M:DecideSubtlety(cfg, tracing)
             return plan(nil, "pooling energy for Rupture, " .. cp .. " CP", extras)
         end
         return plan("Rupture", "Taste for Blood due, " .. cp .. " CP", extras)
+    end
+
+    -- P3' Where Rupture would have gone, on a target that dies before it pays:
+    -- Eviscerate, with the same points.
+    if rupShort and not reserve and cp >= (cfg.ruptureCP or 5) and self:KnowsSpell("Eviscerate") then
+        if not Aegis_SBR:CanAfford("Eviscerate") then
+            return plan(nil, "pooling energy for Eviscerate, " .. cp .. " CP", extras)
+        end
+        return self:FinisherPlan(cfg, cp, "Eviscerate",
+            string.format("dies in %.0fs, no Rupture, %d CP", rupShort, cp), extras)
     end
 
     -- P4 Slice and Dice with the point Ruthlessness returned after a finisher

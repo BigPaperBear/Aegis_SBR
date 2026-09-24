@@ -4,6 +4,72 @@ All notable changes to **Aegis: Single Button Rotation** (formerly **AutoRota**)
 
 ---
 
+## v1.2.37 — emergencies break the cast, taps count what they cost
+
+### 🐛 Paladin — the emergency waited behind the heal
+
+A cast-time spell kept running when the health crossed an emergency line, and the bubble or
+Lay on Hands was queued behind it. Every hit taken meanwhile pushed the cast back, and more
+than once the emergency arrived after the death it was meant to prevent.
+
+- The cast in flight is now stopped the moment the line is crossed: a watcher checks ten
+  times a second between presses, and the emergency steps stop it themselves before they send.
+  The heal prediction of the stopped cast is dropped with it.
+- Which emergency is due - Divine Shield, Divine Protection, Lay on Hands, with the combat,
+  Forbearance, bubble, cooldown and cost checks - is one read-only answer used by the watcher
+  and the rotation alike, so a cast is never stopped for an emergency that then does not fire.
+- The global cooldown of the stopped cast still runs; the emergency goes out at its end.
+
+### 🔧 Paladin — the bubble top-up rounds up
+
+Under the bubble the rank was the largest heal still *under* what was left to the goal, which
+ended every top-up in four or five rank 1 Holy Lights from about 95% - the slowest way through
+the window and the worst mana per point healed on the ladder (rank 1 heals 43 for 35 mana,
+rank 9 1680 for 660). The top-up now takes the smallest rank that covers the rest, else the
+largest affordable; on every tab that has the setting. Everywhere else the ranks still round
+down.
+
+### 🔧 Paladin — Solofarming strikes
+
+- **Crusader Strike at rank 1:** on the Solofarming tab the downrank switch casts rank 1
+  always - the strike only resets Holy Shock there, and the reset does not care which rank
+  lands (20 mana instead of 120).
+- **The reset keeps trying below the Holy Shock line.** The healer's rule "below the line, heal
+  instead of striking" applied to Solofarming too, where the one below the line is the paladin
+  and the reset is how the heal comes back. With Blessed Strikes under 5/5 the reset needs two
+  or three strikes, and only the seconds above the line could carry them - it gave up after
+  two. The self-heal still runs first; the reset takes the presses left over.
+- The Crusader Strike downrank ceilings are the costs of the ranks above (20/40/70/100/120
+  mana at ranks 1-5): the strike goes out at the highest rank the mana pays for. The earlier
+  table held rank 2 up to 130 mana.
+
+### 🐛 Warlock — Life Tap under the health line
+
+- Every tap tested the health **before** it: 45% against a 40% line was safe, and the tap
+  left 35%. The test is now on the health the tap leaves, with the cost read off the tooltip
+  (rank values as the fallback). All four tap sites: under the mana line, the low-mana valve,
+  and the out-of-combat tap.
+- **Keep HP above with aggro** (new, default 70%): while the mob's target is you, the higher
+  of the two lines applies. A mob held by the pet does not count.
+- **Life Tap before Drain Life:** with nothing attacking you, a Drain Life (filler or between
+  Dark Harvests) is preceded by a tap while the health after it stays above the line and the
+  whole tap fits under the mana bar - Drain Life then heals back what a full bar would have
+  thrown away. Honours the Life Tap switch.
+
+### ✨ Rogue — Rupture only on targets that live long enough
+
+- **Only if the target lives** (Rupture section, off by default, 4-40 s, default 16): Rupture
+  only when the time-to-kill estimate says the target lives at least that long. Raid trash
+  that dies sooner gets no Rupture and no Taste for Blood wait; on Subtlety the points go into
+  Eviscerate where Rupture would have taken them. Until the estimate has a few seconds of
+  damage to work with, Rupture is allowed. Works on every rogue tab, each with its own setting.
+- **Execute on Subtlety:** the Execute section was shown on the Subtlety tab and ignored by
+  its rotation. It now dumps the points into Eviscerate below the health line there too
+  (fewest points, and the time-to-kill brake below five), ahead of Expose Armor and its
+  reserve - a debuff on a dying target is thirty seconds nobody uses.
+
+---
+
 ## v1.2.36 — immunities are remembered, profiles travel as text
 
 ### ✨ A learned immunity table, shared by the account

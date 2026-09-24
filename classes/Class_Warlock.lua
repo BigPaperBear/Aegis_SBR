@@ -47,7 +47,7 @@ local M = Aegis_SBR:NewClassModule("WARLOCK")
 M.uiTitle = "Warlock"
 -- Rotate runs under Aegis_SBR:Preview without casting (see Pick/Later).
 M.previewReady = true
-M.uiHeight = 966
+M.uiHeight = 994
 M.meleeAutoAttack = false   -- caster, no white melee swing
 
 -- Talent that turns on the free instant Shadow Bolt proc (Shadow Trance).
@@ -560,6 +560,9 @@ function M:NormalizeProfile(c)
     if c.lifeTap == nil then c.lifeTap = false end
     if c.lifeTapMana == nil then c.lifeTapMana = 20 end
     if c.lifeTapHpMin == nil then c.lifeTapHpMin = 40 end
+    -- The floor while a mob is on you: health the tap takes is health the
+    -- next hits do not have to take.
+    if c.lifeTapAggroHp == nil then c.lifeTapAggroHp = 70 end
     if c.lifeTapIdle == nil then c.lifeTapIdle = false end
     if c.lifeTapIdleMana == nil then c.lifeTapIdleMana = 100 end
     if c.drainMana == nil then c.drainMana = false end
@@ -1888,6 +1891,98 @@ end
 -- mana is there at the pull. The HP floor from the in-combat tap applies; the
 -- combat mana slider does not, this has its own. Nothing else is done here:
 -- with a friendly target, or in combat, the press stays idle as before.
+-- ============================================================
+-- Life Tap: what it costs, and when it is safe
+--
+-- Every tap used to test the health BEFORE it: 45% against a 40% line was
+-- "safe", and the tap then left the warlock at 35% - under the line the player
+-- set, which is how it was reported ("tapping under my health threshold").
+-- The test is now on the health the tap leaves. The cost is read off the
+-- tooltip ("Converts N health into N mana"); rank values are the fallback
+-- when the tooltip does not read.
+-- ============================================================
+local LT_TIP = "AegisWarlockTapTip"
+local ltTip
+local LIFE_TAP_HEALTH = { 30, 75, 140, 220, 310, 424 }   -- ranks 1-6, fallback
+local LT_CACHE_SECS = 30
+
+-- Health taken and mana given by one Life Tap at the highest known rank.
+function M:LifeTapCost()
+    local slot = Aegis_SBR:FindSpellSlot("Life Tap")
+    if not slot then return nil, nil end
+    local now = GetTime()
+    if self.ltSlot == slot and self.ltCost and now - (self.ltAt or 0) < LT_CACHE_SECS then
+        return self.ltCost, self.ltGain
+    end
+    if not ltTip then ltTip = CreateFrame("GameTooltip", LT_TIP, nil, "GameTooltipTemplate") end
+    ltTip:SetOwner(UIParent, "ANCHOR_NONE")
+    ltTip:ClearLines()
+    ltTip:SetSpell(slot, BOOKTYPE_SPELL)
+    local cost, gain
+    for i = 2, 10 do
+        local fs = getglobal(LT_TIP .. "TextLeft" .. i)
+        local txt = fs and fs:GetText()
+        if txt and not cost then
+            local _, _, a = string.find(txt, "(%d+) health")
+            if a then
+                cost = tonumber(a)
+                local _, _, b = string.find(txt, "(%d+) mana")
+                if b then gain = tonumber(b) end
+            end
+        end
+    end
+    if not cost then
+        local r = self:MaxRank("Life Tap")
+        cost = LIFE_TAP_HEALTH[r] or LIFE_TAP_HEALTH[table.getn(LIFE_TAP_HEALTH)]
+    end
+    gain = gain or cost
+    self.ltSlot, self.ltCost, self.ltGain, self.ltAt = slot, cost, gain, now
+    return cost, gain
+end
+
+-- Health percent left after one Life Tap.
+function M:HPAfterTap()
+    local mx = UnitHealthMax("player") or 0
+    if mx <= 0 then return 0 end
+    local cost = self:LifeTapCost() or 0
+    return (UnitHealth("player") - cost) / mx * 100
+end
+
+-- A mob on the warlock: the target's target is the player. A pet holding the
+-- mob answers no, which is what the pet is for.
+function M:HasAggro()
+    if not UnitExists("target") or not UnitCanAttack("player", "target") then return false end
+    return (UnitExists("targettarget") and UnitIsUnit("targettarget", "player")) and true or false
+end
+
+-- The one in-combat Life Tap gate: the switch, the spell, and the health the
+-- tap leaves above "Keep HP above" - or above "Keep HP above with aggro" when
+-- a mob is on you, whichever is higher.
+function M:TapSafe(cfg)
+    if not cfg.lifeTap or not self:KnowsSpell("Life Tap") then return false end
+    local floor = cfg.lifeTapHpMin or 40
+    if self:HasAggro() then
+        local af = cfg.lifeTapAggroHp or 70
+        if af > floor then floor = af end
+    end
+    return self:HPAfterTap() > floor
+end
+
+-- Before a Drain Life: tap first while there is health to spare and room in
+-- the mana bar. Drain Life's return is health, and at a full bar that return
+-- is thrown away; the tap turns the spare health into mana and the channel
+-- then gives it back. Not with a mob on you - there the health is not spare -
+-- and only when the whole tap fits under the mana bar.
+function M:TapBeforeDrain(cfg, channel)
+    if channel ~= "Drain Life" then return false end
+    if self:HasAggro() then return false end
+    if not self:TapSafe(cfg) then return false end
+    local _, gain = self:LifeTapCost()
+    local missing = (UnitManaMax("player") or 0) - (UnitMana("player") or 0)
+    if not gain or missing < gain then return false end
+    return self:Queue("Life Tap", "mana before Drain Life") and true or false
+end
+
 -- Whether the core should leave the target alone this press: the idle tap
 -- wants a press with no target, and auto-acquire would hand it a mob and a
 -- DoT on it instead - reported as pulling while tapping up between fights.
@@ -1896,7 +1991,7 @@ function M:HoldAcquire(cfg)
     if UnitAffectingCombat("player") then return false end
     if not self:KnowsSpell("Life Tap") then return false end
     if self:ManaPct() >= (cfg.lifeTapIdleMana or 100) then return false end
-    return self:PlayerHPPct() > (cfg.lifeTapHpMin or 40)
+    return self:HPAfterTap() > (cfg.lifeTapHpMin or 40)
 end
 
 function M:Prebuff(cfg)
@@ -1904,7 +1999,7 @@ function M:Prebuff(cfg)
     if UnitExists("target") or UnitAffectingCombat("player") then return false end
     if not self:KnowsSpell("Life Tap") then return false end
     if self:ManaPct() >= (cfg.lifeTapIdleMana or 100) then return false end
-    if self:PlayerHPPct() <= (cfg.lifeTapHpMin or 40) then return false end
+    if self:HPAfterTap() <= (cfg.lifeTapHpMin or 40) then return false end
     return self:Pick("Life Tap", "mana before the pull")
 end
 
@@ -2269,7 +2364,7 @@ function M:Rotate(cfg)
     -- target carrying a mana-return debuff (e.g. a paladin's Seal of Wisdom),
     -- can even help you recover.
     if self:ManaPct() < (cfg.wandManaFloor or 15) then
-        if cfg.lifeTap and self:KnowsSpell("Life Tap") and hp > (cfg.lifeTapHpMin or 40) then
+        if self:TapSafe(cfg) then
             if self:Queue("Life Tap", "mana from health") then return end
         end
         if self:HasWand() then
@@ -2404,10 +2499,8 @@ function M:Rotate(cfg)
         end
         if self:Queue("Drain Mana", "mana from the target") then return end
     end
-    if cfg.lifeTap and self:KnowsSpell("Life Tap") and not dhFirst then
-        if self:ManaPct() < (cfg.lifeTapMana or 20) and self:PlayerHPPct() > (cfg.lifeTapHpMin or 40) then
-            if self:Queue("Life Tap", "mana from health") then return end
-        end
+    if not dhFirst and self:ManaPct() < (cfg.lifeTapMana or 20) and self:TapSafe(cfg) then
+        if self:Queue("Life Tap", "mana from health") then return end
     end
 
     -- Dark Harvest is cooldown-gated rather than learned/unlearned, so it needs
@@ -2535,6 +2628,7 @@ function M:Rotate(cfg)
             end
             local overrun = len - dhBack
             if overrun <= DH_OVERRUN_MAX then
+                if self:TapBeforeDrain(cfg, gap) then return end
                 if self:Queue(gap, "gap channel") then return end
                 -- Refused (moving, out of range, locked out - see ChannelRefusal).
                 if self:HasWand() and not self:Wanding() then
@@ -2647,6 +2741,7 @@ function M:Rotate(cfg)
                 end
             end
         end
+        if self:TapBeforeDrain(cfg, filler) then return end
         if self:Queue(filler, "filler channel") then return end
         -- Refused - moving, out of the channel's range, or a target that takes
         -- no life drain. The wand is the one ranged attack that costs nothing

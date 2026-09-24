@@ -55,13 +55,15 @@ function M:ConsecrationCrowded(cfg)
     return n >= want
 end
 
--- Absolute-mana downrank thresholds (Turtle WoW), mirroring the proven
--- ExAutoCSHS tables. Cast the lowest-numbered rank whose ceiling the current
--- raw mana is under; at or above the last ceiling, use full rank. These are
--- flat mana costs, so they self-adjust by level: a small pool naturally lands
--- on cheaper ranks, while a large pool stays at full rank until nearly empty.
+-- Absolute-mana downrank thresholds (Turtle WoW). Cast the lowest-numbered
+-- rank whose ceiling the current raw mana is under; at or above the last
+-- ceiling, use full rank. Each ceiling is the cost of the NEXT rank, so the
+-- rank cast is the highest one the mana pays for: Crusader Strike costs
+-- 20/40/70/100/120 at ranks 1-5 (read off the tooltips). The earlier table
+-- (40/130/170/200, taken over from ExAutoCSHS) kept rank 2 up to 130 mana,
+-- where rank 5 was affordable.
 local DOWNRANK = {
-    ["Crusader Strike"] = { 40, 130, 170, 200 },            -- R1..R4 ceilings, else max
+    ["Crusader Strike"] = { 40, 70, 100, 120 },             -- R1..R4 ceilings, else max
     ["Holy Strike"]     = { 12, 25, 38, 51, 64, 75, 90 },   -- R1..R7 ceilings, else max
 }
 
@@ -754,11 +756,21 @@ function M:DownrankFor(name)
     return nil
 end
 
+-- Solofarming: Crusader Strike is cast for one thing only, the Holy Shock
+-- reset through Blessed Strikes, and the reset does not care which rank
+-- lands. With the downrank switch on there, rank 1 goes out at any mana -
+-- the ceilings of the leveling downrank would keep the full rank until the
+-- pool is nearly empty, which is the mana the switch is meant to keep.
+function M:SoloRankOne(name, cfg)
+    return cfg.spec == "solo" and cfg.strikeDownrank and name == "Crusader Strike"
+end
+
 -- The rank a strike would actually cast right now (clamped to what is known),
 -- used both for casting and for the trace readout.
 function M:EffectiveStrikeRank(name, cfg)
     local maxR = self:MaxRank(name)
     if not cfg.strikeDownrank then return maxR end
+    if self:SoloRankOne(name, cfg) then return (maxR > 0) and 1 or maxR end
     local r = self:DownrankFor(name)
     if not r or maxR == 0 or r >= maxR then return maxR end
     return r
@@ -808,7 +820,7 @@ function M:CastStrike(name, cfg)
     -- thing downranking exists for.
     if cfg.strikeDownrank then
         local maxR = self:MaxRank(name)
-        local r = self:DownrankFor(name)
+        local r = self:SoloRankOne(name, cfg) and 1 or self:DownrankFor(name)
         if r and maxR > 0 and r < maxR then
             local ranked = name .. "(Rank " .. r .. ")"
             -- No affordability gate on the downranked cast, deliberately. The
@@ -2104,17 +2116,34 @@ end
 -- The padding is the cast-time compensation: the target keeps losing health
 -- while the cast is in flight, so a slow heal is judged against 80% of its size
 -- and a fast one against 90%. Out of combat there is nothing to compensate.
-function M:SelectRank(ranks, known, healneed, mana, healMod, talentMod, pad, minRank, maxRank)
+--
+-- roundUp reverses the rule: the SMALLEST rank that covers the need, else the
+-- largest affordable one. For the top-up under the bubble (see PanicHeal),
+-- where overheal costs only mana and a wasted cast costs a share of a window
+-- that runs out. Rounding down there ended every top-up in a string of rank 1
+-- casts - reported as four or five of them from 95% up - and those are the
+-- WORST mana per point healed the ladder has: Holy Light rank 1 heals 43 for
+-- 35 mana, rank 9 heals 1680 for 660. Low ranks buy their place with a small
+-- absolute cost, never with efficiency.
+function M:SelectRank(ranks, known, healneed, mana, healMod, talentMod, pad, minRank, maxRank, roundUp)
     local pick, size
+    local topR, topSize
     for i = 1, table.getn(ranks) do
         local e = ranks[i]
         if e.rank <= known and e.rank <= (maxRank or 99) and mana >= e.mana then
             local total = (e.base + healMod * (e.pf or 1)) * talentMod
-            if i == 1 or healneed > (total * pad) or e.rank <= (minRank or 1) then
+            if roundUp then
+                topR, topSize = e.rank, total
+                if not pick and total >= healneed and e.rank >= (minRank or 1) then
+                    pick, size = e.rank, total
+                end
+            elseif i == 1 or healneed > (total * pad) or e.rank <= (minRank or 1) then
                 pick, size = e.rank, total
             end
         end
     end
+    -- Nothing covers it: the largest that can be paid for.
+    if roundUp and not pick then pick, size = topR, topSize end
     return pick, size
 end
 
@@ -2158,19 +2187,22 @@ function M:CascadePick(cfg, rankDeficit, pct, mana, hlFast)
     -- covers the need outright.
     local useHL = noFL or ((not healthy or hlFast) and (not flCovers))
 
+    -- Set by the bubble top-up only (PanicHeal): round the rank UP there.
+    local up = cfg.healRoundUp and true or false
+
     local rank, size
     if useHL then
         rank, size = self:SelectRank(self.HL_RANKS, hlKnown, rankDeficit, mana, hlMod,
-            talentMod, padSlow, cfg.hlMinRank, cfg.hlMaxRank)
+            talentMod, padSlow, cfg.hlMinRank, cfg.hlMaxRank, up)
         if rank then return "Holy Light(Rank " .. rank .. ")", size, hlCast end
     end
     rank, size = self:SelectRank(self.FOL_RANKS, folKnown, rankDeficit, mana, folMod,
-        talentMod, padFast, cfg.folMinRank, cfg.folMaxRank)
+        talentMod, padFast, cfg.folMinRank, cfg.folMaxRank, up)
     if rank then return "Flash of Light(Rank " .. rank .. ")", size, 1.5 end
     -- Flash of Light unaffordable or unknown: Holy Light is better than nothing.
     if not useHL then
         rank, size = self:SelectRank(self.HL_RANKS, hlKnown, rankDeficit, mana, hlMod,
-            talentMod, padSlow, cfg.hlMinRank, cfg.hlMaxRank)
+            talentMod, padSlow, cfg.hlMinRank, cfg.hlMaxRank, up)
         if rank then return "Holy Light(Rank " .. rank .. ")", size, hlCast end
     end
     return nil, nil, nil
@@ -2469,8 +2501,20 @@ function M:HealStrikeEngine(cfg)
     if not self:BlessedReloadUsable() then return false end
     if self:OwnCDReady("Holy Shock") then return false end          -- already loaded
     if not self:IsReady("Crusader Strike") then return false end
-    local _, _, pct = self:WorstHurt((cfg.healThreshold or 75) / 100)
-    if pct and pct <= (cfg.holyShockPct or 50) / 100 then return false end
+    -- The healer's rule: whoever is below the Holy Shock line gets a heal, not
+    -- a strike. In Solofarming that person is the paladin - and there the rule
+    -- cancels the thing it protects: the reset IS how the heal comes back, and
+    -- below the line it was forbidden, so the press went to Holy Light and
+    -- Holy Shock stayed on cooldown. With Blessed Strikes under 5/5 the reset
+    -- needs two or three strikes on average, and only the seconds spent ABOVE
+    -- the line were allowed to carry them - reported as the reset giving up
+    -- after two tries. SoloHeal runs ahead of the strike block and takes every
+    -- press a heal can use, so what is left here was going to the damage
+    -- rotation anyway.
+    if cfg.spec ~= "solo" then
+        local _, _, pct = self:WorstHurt((cfg.healThreshold or 75) / 100)
+        if pct and pct <= (cfg.holyShockPct or 50) / 100 then return false end
+    end
     if not self:HealMeleeReady(cfg) then return false end
     return self:CastStrike("Crusader Strike", cfg)
 end
@@ -2702,26 +2746,75 @@ end
 --
 -- Skipped while one is already up, and while Forbearance blocks a new one: the
 -- cast would fail and the press would be spent on nothing.
-function M:PanicShield(cfg)
-    if (cfg.panicPct or 0) <= 0 then return false end
-    -- Out of combat a low health bar is not an emergency, it is lunch. Bubbling
-    -- there burns a five minute cooldown for nothing - reported exactly that
-    -- way: "I was out of combat and just bubbled myself for no reason".
-    if not UnitAffectingCombat("player") then return false end
+-- Which emergency spell is due right now, or nil. Read-only, and the single
+-- answer both panic steps and the cast breaker below use, so the breaker can
+-- never stop a cast for an emergency the rotation would then not fire.
+--
+-- Order is the one recorded at tankLohPct: the shield first where both lines
+-- are crossed at once, five minutes being a far cheaper cooldown than an hour.
+--
+-- Out of combat a low health bar is not an emergency, it is lunch. Bubbling
+-- there burns a five minute cooldown for nothing - reported exactly that way:
+-- "I was out of combat and just bubbled myself for no reason".
+function M:EmergencySpell(cfg)
+    if not cfg then return nil end
+    if not UnitAffectingCombat("player") then return nil end
     local mx = UnitHealthMax("player")
-    if not mx or mx <= 0 then return false end
-    if (UnitHealth("player") / mx) > (cfg.panicPct / 100) then return false end
-    if self:SelfInvulnerable() then return false end
-    if self:HasBuff("Forbearance") then return false end
-    if self:KnowsSpell("Divine Shield") and self:OwnCDReady("Divine Shield")
-        and self:Affordable("Divine Shield") then
-        return self:Pick("Divine Shield", "emergency")
+    if not mx or mx <= 0 then return nil end
+    local pct = UnitHealth("player") / mx
+    if self:SelfInvulnerable() then return nil end
+    if (cfg.panicPct or 0) > 0 and pct <= (cfg.panicPct / 100)
+        and not self:HasBuff("Forbearance") then
+        if self:KnowsSpell("Divine Shield") and self:OwnCDReady("Divine Shield")
+            and self:Affordable("Divine Shield") then
+            return "Divine Shield"
+        end
+        if self:KnowsSpell("Divine Protection") and self:OwnCDReady("Divine Protection")
+            and self:Affordable("Divine Protection") then
+            return "Divine Protection"
+        end
     end
-    if self:KnowsSpell("Divine Protection") and self:OwnCDReady("Divine Protection")
-        and self:Affordable("Divine Protection") then
-        return self:Pick("Divine Protection", "emergency")
+    if (cfg.tankLohPct or 0) > 0 and pct <= (cfg.tankLohPct / 100)
+        and self:KnowsSpell("Lay on Hands") and self:OwnCDReady("Lay on Hands") then
+        return "Lay on Hands"
     end
-    return false
+    return nil
+end
+
+-- Drop the cast in flight before the emergency goes out.
+--
+-- Sent behind a cast, an instant waits out the rest of it - the client holds
+-- it, or Nampower queues it - and every hit that lands meanwhile pushes that
+-- cast back further, so a two and a half second Holy Light becomes four and
+-- the bubble arrives after the death it was meant to prevent. Reported from
+-- play, with people dying behind a heal that was still casting.
+--
+-- The global cooldown of the cancelled cast still runs (it started with the
+-- cast), so the emergency goes out at the end of that rather than at the end
+-- of the pushed-back cast bar.
+function M:BreakCastForEmergency(spell)
+    if not self:StillCasting() then return false end
+    SpellStopCasting()
+    self.castingUntil = nil
+    -- The prediction belonged to a heal that will not land now. Left standing,
+    -- the target reads healthier than they are for the rest of its window.
+    self.healUntil = nil
+    self.healTarget = nil
+    self.healUnit = nil
+    self.healAmount = 0
+    if self:Tracing() then self:Trace("cast stopped for " .. tostring(spell)) end
+    if Aegis_SBR.logging then
+        Aegis_SBR:LogWrite("emergency: cast stopped for " .. tostring(spell))
+    end
+    return true
+end
+
+-- Last resort: stop everything and become invulnerable.
+function M:PanicShield(cfg)
+    local sp = self:EmergencySpell(cfg)
+    if sp ~= "Divine Shield" and sp ~= "Divine Protection" then return false end
+    self:BreakCastForEmergency(sp)
+    return self:Pick(sp, "emergency")
 end
 
 -- Lay on Hands on yourself, as the tank's last resort.
@@ -2730,20 +2823,13 @@ end
 -- client, and if that ever changed the cast would simply fail without consuming
 -- the cooldown. It does drain your mana, which is why it sits below every other
 -- answer and behind a threshold you set yourself.
+-- Never on top of a bubble, and never before one: EmergencySpell answers with
+-- the shield while both lines are crossed, and with nothing at all while
+-- invulnerable - there is nothing to heal against under a bubble, and without
+-- that an HOUR-long cooldown was spent on somebody who could not be damaged.
 function M:PanicLayOnHands(cfg)
-    if (cfg.tankLohPct or 0) <= 0 then return false end
-    if not UnitAffectingCombat("player") then return false end
-    -- Never on top of a bubble. Both thresholds can be crossed at once, and the
-    -- shield fires first - so without this the next press spent an HOUR-long
-    -- cooldown healing somebody who cannot currently be damaged. While
-    -- invulnerable there is nothing to heal against; when it drops, this fires
-    -- on its own if the health is still low enough.
-    if self:SelfInvulnerable() then return false end
-    if not self:KnowsSpell("Lay on Hands") then return false end
-    local mx = UnitHealthMax("player")
-    if not mx or mx <= 0 then return false end
-    if (UnitHealth("player") / mx) > (cfg.tankLohPct / 100) then return false end
-    if not self:OwnCDReady("Lay on Hands") then return false end
+    if self:EmergencySpell(cfg) ~= "Lay on Hands" then return false end
+    self:BreakCastForEmergency("Lay on Hands")
     return Aegis_SBR:CastOnUnit("Lay on Hands", "player", "emergency")
 end
 
@@ -2781,8 +2867,12 @@ function M:PanicHeal(cfg)
         if self:KnowsSpell("Holy Light") then
             local known = self:MaxRank("Holy Light")
             if known > table.getn(self.HL_RANKS) then known = table.getn(self.HL_RANKS) end
+            -- Rounded UP: the smallest rank that covers what is left to the
+            -- goal. Rounding down finished every top-up with four or five
+            -- rank 1 casts, which is both the slowest way through the window
+            -- and the worst mana per point healed.
             local rank, size = self:SelectRank(self.HL_RANKS, known, need, mana, (2.5 / 3.5) * hp,
-                talentMod, 1.0, cfg.hlMinRank, cfg.hlMaxRank)
+                talentMod, 1.0, cfg.hlMinRank, cfg.hlMaxRank, true)
             if rank then
                 local spell = "Holy Light(Rank " .. rank .. ")"
                 local hlFast = self:BuffTextureUp(FORCE_HL_TEX) or self:HasBuff("Holy Judgement")
@@ -2809,7 +2899,8 @@ function M:PanicHeal(cfg)
     -- the health bar is the state, so there is nothing to get out of step.
     -- A view over the profile rather than a copy: the profile may itself be
     -- the tab view, which pairs() cannot walk.
-    local win = setmetatable({ spec = "solo", healThreshold = goal, healSelfPct = 0 }, { __index = cfg })
+    local win = setmetatable({ spec = "solo", healThreshold = goal, healSelfPct = 0,
+        healRoundUp = true }, { __index = cfg })
     return self:DoHeal(win)
 end
 
@@ -3608,6 +3699,33 @@ overhealFrame:SetScript("OnUpdate", function()
         M.healUnit = nil
         M.healAmount = 0
     end
+end)
+
+-- ============================================================
+-- Emergency cast breaker
+--
+-- The panic steps break the cast themselves, but only when a press reaches
+-- them. This watches between presses, so the moment the health crosses the
+-- line the cast bar stops - what the press then finds is a client that is
+-- free, rather than one holding a heal that keeps being pushed back.
+--
+-- Ten times a second is enough: the cast it interrupts runs for seconds, and
+-- the work is one health read plus the gates behind it.
+-- ============================================================
+local EMERGENCY_TICK = 0.1
+
+local emergencyFrame = CreateFrame("Frame")
+emergencyFrame:SetScript("OnUpdate", function()
+    if Aegis_SBR.active ~= M then return end
+    local now = GetTime()
+    if (M.emergencyTick or 0) > now then return end
+    M.emergencyTick = now + EMERGENCY_TICK
+    if not M:StillCasting() then return end
+    local cfg = Aegis_SBR:GetActiveProfile()
+    if not cfg then return end
+    cfg = M:SpecConfig(cfg)
+    local sp = M:EmergencySpell(cfg)
+    if sp then M:BreakCastForEmergency(sp) end
 end)
 
 -- ============================================================
