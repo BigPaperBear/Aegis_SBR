@@ -46,6 +46,8 @@ function M:BuildBody(ui, parent)
         slider = { key = "ltMana", min = 0, max = 100, step = 5, suffix = "%", onChange = set("lifeTapMana") } }
     self.tapHpRow = L:Row{ label = "Keep HP above",
         slider = { key = "ltHp", min = 0, max = 100, step = 5, suffix = "%", onChange = set("lifeTapHpMin") } }
+    self.tapAggroRow = L:Row{ label = "Keep HP above with aggro",
+        slider = { key = "ltAggro", min = 0, max = 100, step = 5, suffix = "%", onChange = set("lifeTapAggroHp") } }
     self.tapIdleRow = L:Row{ key = "lifeTapIdle", label = "Tap out of combat up to", spell = "Life Tap", onToggle = set("lifeTapIdle"),
         slider = { key = "ltIdle", min = 0, max = 100, step = 5, suffix = "%", onChange = set("lifeTapIdleMana") } }
     self.drainManaRow = L:Row{ key = "drainMana", label = "Drain Mana from casters", spell = "Drain Mana", onToggle = set("drainMana") }
@@ -89,9 +91,10 @@ function M:BuildBody(ui, parent)
     ui:Tip(self.hellfireRow.cb, "Hellfire", "On an AoE press with a mob in melee range: channel Hellfire, ahead of Rain of Fire. It burns you too, so only above the health on the slider.", "Not while moving, like every channel.")
     ui:Tip(self.hellfireRow.slider, "Hellfire above", "Your health percent above which Hellfire is used.")
     ui:Tip(self.rofRow.cb, "Rain of Fire at the mouse", "On an AoE press (/sbr run aoe). Lands under the mouse: hold the mouse on the feet of the pack when pressing; with the mouse off any enemy the press skips it. Not while moving.")
-    ui:Tip(self.tapRow.cb, "Life Tap", "Convert health to mana when mana is low and health is high.")
+    ui:Tip(self.tapRow.cb, "Life Tap", "Convert health to mana when mana is low and health is high.", "Also before Drain Life when nothing is attacking you and the mana bar has room: the channel gives the health back.")
     ui:Tip(self.tapRow.slider, "Tap below mana", "Life Tap only when mana is under this value.")
-    ui:Tip(self.tapHpRow.slider, "Keep HP above", "Life Tap only while health stays over this value.")
+    ui:Tip(self.tapHpRow.slider, "Keep HP above", "Life Tap only when your health AFTER the tap stays over this value.")
+    ui:Tip(self.tapAggroRow.slider, "Keep HP above with aggro", "The same line while a mob is attacking you. The higher of the two applies.", "With a mob on you there is also no Life Tap ahead of Drain Life.")
     ui:Tip(self.tapIdleRow.cb, "Tap out of combat", "With no target and out of combat, each press Life Taps until mana reaches the slider value - the HP floor above still applies.")
     ui:Tip(self.tapIdleRow.slider, "Tap up to", "Mana percent to reach before the next pull. 100 = full.")
     ui:Tip(self.drainManaRow.cb, "Drain Mana from casters", "Below the Life Tap mana line, a target with mana is drained instead of tapping. Mobs without mana are never drained; Life Tap covers those.", "A channel: not while moving, and lapsing DoTs are topped up first.")
@@ -192,6 +195,8 @@ function M:RefreshBody(ui, buf)
     local tapOn = self:KnowsSpell("Life Tap") and buf.lifeTap
     ui:SliderEnable(self.tapRow.slider, tapOn and true or false)
     ui:SliderEnable(self.tapHpRow.slider, tapOn and true or false)
+    self.tapAggroRow.slider:SetValue(buf.lifeTapAggroHp or 70); self.tapAggroRow.slider.valText:SetText((buf.lifeTapAggroHp or 70) .. "%")
+    ui:SliderEnable(self.tapAggroRow.slider, tapOn and true or false)
 
     -- Always active: a safety net independent of the Life Tap toggle above.
     self.dhDotRow.slider:SetValue(buf.dhDotRemain or 0); self.dhDotRow.slider.valText:SetText((buf.dhDotRemain or 0) .. "s")

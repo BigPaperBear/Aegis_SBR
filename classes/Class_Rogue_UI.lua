@@ -130,6 +130,8 @@ function M:BuildBody(ui, parent)
     L:Header("Rupture", { assassination = true, combat = true, subtlety = true })
     self.rupRow = L:Row{ key = "useRupture", label = "Enable from", spell = "Rupture", onToggle = set("useRupture"),
         slider = { key = "ruptureCP", min = 1, max = 5, step = 1, suffix = "", onChange = set("ruptureCP") } }
+    self.rupTTKRow = L:Row{ key = "useRuptureTTK", label = "Only if the target lives", onToggle = set("useRuptureTTK"),
+        slider = { key = "ruptureMinTTK", min = 4, max = 40, step = 2, suffix = "s", onChange = set("ruptureMinTTK") } }
 
     -- Execute is a PHASE with three conditions, not three features. Under one
     -- header they read as what they are: when it starts, what it may spend, and
@@ -197,6 +199,8 @@ function M:BuildBody(ui, parent)
     ui:Tip(self.rupRow.slider, "Rupture at CP", "Combo points required before Rupture is cast. Lower = renewed more reliably but a weaker buff; higher = stronger buff but it may never be reached, since every buff refresh resets you to 1 point.", "Recommended: 5. A recast simply overwrites the buff at whatever combo points it was cast with, so anything below 5 risks replacing an existing 10% Taste for Blood buff with a weaker one the moment Rupture comes due.")
     ui:Tip(self.evisOnlyRow.cb, "Eviscerate only in execute", "Reserve Eviscerate for the execute phase, so every other combo point goes into maintaining your buffs instead of direct damage.", "Useful once you maintain several buffs: refreshes keep resetting your points, so a normal Eviscerate threshold is rarely reached anyway.")
     ui:Tip(self.cpRow.slider, "Finisher combo points", "Eviscerate is used once combo points reach this number.", "Greyed out while \"Eviscerate only in execute\" is on, since that setting bypasses this threshold entirely.")
+    ui:Tip(self.rupTTKRow.cb, "Rupture only if the target lives", "Rupture only when the target is measured to live at least this many seconds. Shorter: Eviscerate with the same points.", "The estimate needs a few seconds of damage; until then Rupture is allowed.")
+    ui:Tip(self.rupTTKRow.slider, "Target lives at least", "Seconds the target must have left for Rupture to go out.")
     ui:Tip(self.execRow.cb, "Execute low-HP targets", "Below the health value on the right, Eviscerate fires with whatever combo points are on hand (at least 1) instead of waiting for the normal threshold.", "Ruthlessness guarantees a combo point after any finisher, so this rarely goes unused once a fight is underway.")
     ui:Tip(self.execRow.slider, "Execute below", "Target health percent under which Eviscerate finishes early rather than risk combo points going to waste on a kill.")
     ui:Tip(self.cbRow.cb, "Cold Blood with Eviscerate", "Fires Cold Blood in the same press, right before Eviscerate, so the guaranteed crit lands on your biggest hit. Costs no global cooldown.", "Tied to Eviscerate, not used on cooldown: the buff is spent by the next BUILDER too, Noxious Assault included, so popped at any other moment it is wasted. Skipped below the Eviscerate threshold.")
@@ -294,6 +298,11 @@ function M:RefreshBody(ui, buf)
     if self.rupRow.slider.valText then self.rupRow.slider.valText:SetText(">=" .. rupv) end
     -- Was live and settable with Rupture switched off, unlike every other row.
     ui:SliderEnable(self.rupRow.slider, buf.useRupture and true or false)
+    ui:BindCheck(self.rupTTKRow, buf.useRuptureTTK)
+    local rttk = buf.ruptureMinTTK or 16
+    self.rupTTKRow.slider:SetValue(rttk)
+    if self.rupTTKRow.slider.valText then self.rupTTKRow.slider.valText:SetText(">=" .. rttk .. "s") end
+    ui:SliderEnable(self.rupTTKRow.slider, (buf.useRupture and buf.useRuptureTTK) and true or false)
 
     -- 0 is a valid setting ("only once it has dropped"), so this must not use
     -- `or` with a non-zero fallback - that would silently turn 0 into 3.

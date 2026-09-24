@@ -306,7 +306,7 @@ function M:BuildBody(ui, parent)
     ui:Tip(self.spellCB.holyStrike.cb, "Holy Strike", "Shares the 6s strike cooldown with Crusader Strike.", "With Vengeful Strikes it grants Holy Might. Even untalented it returns mana and heals the group.")
     ui:Tip(self.spellCB.crusaderStrike.cb, "Crusader Strike", "Shares the 6s strike cooldown with Holy Strike.", "Builds Zeal. Tank: with Righteous Strikes it also loads the block buff Zealous Defense.")
     ui:Tip(self.strikeStyleDD, "Both-on strategy", "Used only when BOTH strikes are enabled. Enable a single strike alone to force just that one.", "Auto DPS keeps Zeal and, if talented, Holy Might up. Tank block keeps Zealous Defense loaded, else strikes for aggro. HS, then alternate: Holy Strike opens every fight, then the two strictly alternate.")
-    ui:Tip(self.downrankRow.cb, "Downrank when low", "Use lower ranks of Holy/Crusader Strike as raw mana drops, to keep swinging while leveling.", "Full rank until mana nears a rank's cost. A large pool rarely downranks.")
+    ui:Tip(self.downrankRow.cb, "Downrank when low", "Use lower ranks of Holy/Crusader Strike as raw mana drops, to keep swinging while leveling. Full rank until mana nears a rank's cost.", "Solofarming: Crusader Strike always at rank 1 - there it only resets Holy Shock, and the reset does not care which rank lands.")
 
     ui:Tip(self.manaRow.cb, "Mana management", "Below the lower value, hold Seal of Wisdom to recover mana.", "Above the upper value, return to normal damage seals.")
     ui:Tip(self.hpRow.cb, "HP management", "Below the lower value, hold Seal of Light to recover health.", "Above the upper value, return to normal damage seals.")
@@ -413,6 +413,8 @@ function M:RefreshBody(ui, buf)
     end
 
     self.downrankRow.cb:SetChecked(buf.strikeDownrank and true or false)
+    -- Solofarming: the switch means rank 1, always (see SoloRankOne).
+    self.downrankRow.label:SetText(buf.spec == "solo" and "Crusader Strike at rank 1" or "Downrank when low")
 
     -- seal twisting needs a damage seal to time the judge against
     local twistOK = buf.seals.damage ~= "" and self:KnowsSpell(buf.seals.damage)
